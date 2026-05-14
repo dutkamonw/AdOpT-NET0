@@ -16,10 +16,7 @@ repository = "https://github.com/UU-ER/AdOpT-NET0"
 documentation = "https://adopt-net0.readthedocs.io"
 
 [tool.poetry-dynamic-versioning]
-enable = true
-
-[tool.poetry-dynamic-versioning.from-file]
-source = "version.py"
+enable = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
