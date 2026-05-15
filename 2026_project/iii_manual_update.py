@@ -159,44 +159,6 @@ def manual_update():
     print(f"Manual update: Updated matrices for {table_name}")
     
     print("="*100)
- 
-
-
- 
-##################### 3) Update Topology.json  #############################
-    
-    # Get data from combined_selected table in database.duckdb
-    con = duckdb.connect(str(db_path))
-    node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected_final").fetchall()
-    subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected_final").fetchall()
-    con.close()
-
-    # Extract names from tuples to a list of node names
-    node_name_list = [name[0] for name in node_name]
-
-    # List of carriers to be included in the model (must match with the carriers defined in the model)
-    carrier_list = ["electricity", "heat", "CO2captured"]
-
-    # Add subsectors_list into carriers_list, drop null values if there are any
-    subsector_list = [subsector[0] for subsector in subsector if subsector[0] is not None]
-    carrier_list.extend(subsector_list)
-
-    # ---- Update Topology.json
-    with open(path_model_input / "Topology.json", "r") as json_file:
-        topology = json.load(json_file)
-
-    topology["nodes"] = node_name_list
-    topology["carriers"] = carrier_list
-    topology["investment_periods"] = ["period1"]
-    topology["start_date"] =  "2040-01-01 00:00"
-    topology["end_date"] = "2040-12-31 23:00"
-    topology["resolution"] = "1h"
-
-    with open(path_model_input / "Topology.json", "w") as json_file:
-        json.dump(topology, json_file, indent=4)
-    print("Manual update: Updated Topology.json after manual update of selected nodes")
-    print("---------------------")
-
 
 
 def main():

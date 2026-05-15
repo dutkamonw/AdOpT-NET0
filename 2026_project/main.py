@@ -23,11 +23,12 @@
 # 8) Copy all network data and topology files 
 # 9) Assign technologies to nodes based on node type and update emitter JSON files
 
-# Assign carriers data to each nodes
-# 10) Assign electricity/heat limit for ebery nodes, emitter data by using emission_TPH = Demand (as model requirement), assign electricity price data to each nodes based on country, and assign gas price for heat.
+# Assign data to each nodes
+# 10) Assign carrier data(emitters), electricity/heat limit for every nodes, (emitter data by using emission_TPH = Demand (as model requirement), assign electricity price data to each nodes based on country, and assign gas price for heat.
+# 11) Update storage injection rate
 
 # Run the model
-# 11) Run the optimization model and generate results
+# 12) Run the optimization model and generate results
 
 ############################################################################################################################
 
@@ -36,6 +37,7 @@ from pathlib import Path
 import adopt_net0 as adopt
 import shutil
 import duckdb
+import pandas as pd
 from user_defined_function import assign_technologies_to_nodes, copy_all_files, create_matrix, create_node_location
 from i_etl_raw_to_db import etl_raw_to_db
 from ii_data_processing import data_processing
@@ -67,7 +69,7 @@ manual_update_network = True  # Optional step (if there is a manual update on no
 building_node_folder = True # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 10) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = True # Step 11) run the optimization model
+run_model = False # Step 11) run the optimization model
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -82,7 +84,7 @@ if intialize:
     adopt.create_input_data_folder_template(path_model_input)
     print("Initializing the template: Completed")
     # Replace the default producer price index data with the updated 2025 PPI data
-    shutil.copy2(script_dir / "1_raw" /"producer_price_index_euro_2025.csv",  script_dir.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro_2025.csv")
+    shutil.copy2(script_dir / "1_raw" /"producer_price_index_euro.csv",  script_dir.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro.csv")
 
 else:
     print("Skipped initializing the template")
@@ -261,6 +263,18 @@ if prepare_inputs:
             investment_periods=["period1"]
         )
 
+    ### Fill emission factor = 1 for all emitters (as the model will compute the emission based on the demand which is represented by emission_TPH)
+    for _, row in df.iterrows():
+        adopt.fill_carrier_data(
+            folder_path= path_model_input,
+            value_or_data=1, 
+            columns=["Emission factor"],                 
+            carriers=[row["subsector"]],        
+            nodes=[row["name"]],
+            investment_periods=["period1"]
+        )
+    
+
 
     ### Electricity and heat price based on country (if applicable)
     con = duckdb.connect(str(db_path))
@@ -312,15 +326,43 @@ if prepare_inputs:
 
     print("Filled carrier data for all nodes: Completed")
 
+    ######################### 11) Update storage injection rate  #########################
+    
+    con = duckdb.connect(str(db_path))
+    try:
+        storage_df = con.execute(""" SELECT name_sanitized AS node_name, capacity_T FROM combined_selected_final WHERE type = 'storage' AND selection = 'Yes' """).fetchdf()
+    except:
+        storage_df = con.execute(""" SELECT name_sanitized AS node_name, capacity_T FROM combined_selected WHERE type = 'storage'""").fetchdf()
+    con.close()
+
+    if not storage_df.empty:
+        for _, row in storage_df.iterrows():
+            if pd.notna(row['capacity_T']):
+                capacity = float(row['capacity_T'])
+            else:
+                capacity = 1_000_000.0  # Default capacity
+
+            # Assuming the storage can be fully charged or discharged within 25 years in tonne per hour (T/h)
+            injection_rate = capacity / (25 * 365 * 24)  # Convert to T/h
+
+            json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
+        
+            if json_path.exists():
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                data["size_max"] = round(capacity, 2)   # size_max = storage capacity
+                data["Flexibility"]["injection_rate_max"] = round(injection_rate, 4)
+                with open(json_path, 'w') as f:
+                    json.dump(data, f, indent=4)
+    
+    print(f"Updated storage injection rate for {len(storage_df)} storage nodes: Completed")
 
 else:
     print("Skipped preparing model input data")
 
 print("="*100)
 
-
-
-############################# 11) Run the optimization model  ###############################
+############################# 12) Run the optimization model  ###############################
 
 if run_model:
     # Run the optimization model
