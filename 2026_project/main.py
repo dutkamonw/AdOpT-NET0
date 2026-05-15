@@ -26,9 +26,10 @@
 # Assign data to each nodes
 # 10) Assign carrier data(emitters), electricity/heat limit for every nodes, (emitter data by using emission_TPH = Demand (as model requirement), assign electricity price data to each nodes based on country, and assign gas price for heat.
 # 11) Update storage injection rate
+# 12) Apply carbon price to all nodes (Updating CarbonCost.csv)
 
 # Run the model
-# 12) Run the optimization model and generate results
+# 13) Run the optimization model and generate results
 
 ############################################################################################################################
 
@@ -38,6 +39,7 @@ import adopt_net0 as adopt
 import shutil
 import duckdb
 import pandas as pd
+import numpy as np
 from user_defined_function import assign_technologies_to_nodes, copy_all_files, create_matrix, create_node_location
 from i_etl_raw_to_db import etl_raw_to_db
 from ii_data_processing import data_processing
@@ -67,9 +69,9 @@ data_process = True # Step 3) data processing (create matrix, update Topology.js
 manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
 
 building_node_folder = True # Step 4) create node folders based on Topology.json
-prepare_inputs = True # Step 5) to 10) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
+prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = False # Step 11) run the optimization model
+run_model = False # Step 13) run the optimization model
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -173,7 +175,7 @@ if prepare_inputs:
 
     # Reduce time resolution: 8784 hourly timesteps × 548+ arcs = ~5.7M constraints → MemoryError
     # Use 12 typical days (12 × 24 = 288 timesteps) instead of full hourly resolution
-    #configuration["optimization"]["typicaldays"]["N"]["value"] = 12
+    configuration["optimization"]["typicaldays"]["N"]["value"] = 15 # try as Xiao
 
     # Set result path
     configuration['reporting']['save_summary_path']['value'] = str(result_path)
@@ -357,19 +359,38 @@ if prepare_inputs:
     
     print(f"Updated storage injection rate for {len(storage_df)} storage nodes: Completed")
 
+
+
+############################# 12) Apply carbon price ################################
+    # Extract and apply in one go
+    with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as f:
+        node_names = json.load(f)["nodes"]
+
+    carbon_price = 150  # Assume €150/tonne CO2
+    success = 0
+
+    for node in node_names:
+        path = Path(path_model_input / f"period1/node_data/{node}/CarbonCost.csv")
+        df = pd.read_csv(path, sep=";")
+        df["price"] = carbon_price
+        df.to_csv(path, index=False, sep=";") # Save the updated carbon cost back to the same path
+        success += 1
+
+    print(f"Applied carbon price to {success} nodes: Completed")
+
 else:
     print("Skipped preparing model input data")
 
 print("="*100)
 
-############################# 12) Run the optimization model  ###############################
+############################# 13) Run the optimization model  ###############################
 
 if run_model:
     # Run the optimization model
     print("Running the optimization model...")
    
     m = adopt.ModelHub()
-    m.read_data(path_model_input)
+    m.read_data(path_model_input, start_period=0, end_period=1)
     print("Reading data: Completed")
    
 
