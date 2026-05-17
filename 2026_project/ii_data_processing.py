@@ -140,14 +140,8 @@ def data_processing():
     
     # Get data from combined_selected table in database.duckdb
     con = duckdb.connect(str(db_path))
-    try:
-        node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE selection = 'Yes'").fetchall()
-    except:
-        node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected").fetchall()
-    try:
-        subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected_final WHERE selection = 'Yes'").fetchall()
-    except:
-        subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected").fetchall()
+    node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected").fetchall()
+    subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected").fetchall()
     con.close()
 
     # Extract names from tuples to a list of node names

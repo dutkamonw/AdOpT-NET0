@@ -39,7 +39,6 @@ import adopt_net0 as adopt
 import shutil
 import duckdb
 import pandas as pd
-import numpy as np
 from user_defined_function import assign_technologies_to_nodes, copy_all_files, create_matrix, create_node_location
 from i_etl_raw_to_db import etl_raw_to_db
 from ii_data_processing import data_processing
@@ -62,8 +61,8 @@ db_path = script_dir / "database.duckdb"
 ############################## [!!IMPORTANT!!]  IDENTIFY WHICH STEPS TO RUN ########################################################################################################
 
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
-intialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
-raw_prep = False # Step 2) ETL raw data to database
+intialize = True # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
+raw_prep = True # Step 2) ETL raw data to database
 data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
 manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
@@ -252,7 +251,10 @@ if prepare_inputs:
     ### Emission for each emitters
     #  For each emitter node, assign the emission_TPH value as 'Demand' for the corresponding subsector as carrier 
     con = duckdb.connect(str(db_path))
-    df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'").df()
+    try:
+        df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").df()
+    except:
+        df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'").df()
     con.close()
     
     for _, row in df.iterrows():
@@ -282,7 +284,10 @@ if prepare_inputs:
     con = duckdb.connect(str(db_path))
     df_price = con.execute("SELECT * FROM electricity_price_yearly").df()
     # Assign price to 'emitter' and 'port', except 'storage'
-    df_nodes = con.execute("SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected WHERE type != 'storage' ").df()
+    try:
+        df_nodes = con.execute("SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected_final WHERE type != 'storage' AND selection = 'Yes' ").df()
+    except:
+        df_nodes = con.execute("SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected WHERE type != 'storage' ").df()
     con.close()
 
     # Assign price for each node by merging nodes with iso2
