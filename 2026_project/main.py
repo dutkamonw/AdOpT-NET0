@@ -61,8 +61,8 @@ db_path = script_dir / "database.duckdb"
 ############################## [!!IMPORTANT!!]  IDENTIFY WHICH STEPS TO RUN ########################################################################################################
 
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
-intialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
-raw_prep = False # Step 2) ETL raw data to database
+intialize = True # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
+raw_prep = True # Step 2) ETL raw data to database
 data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
 manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
