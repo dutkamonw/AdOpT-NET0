@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import tsam.timeseriesaggregation as tsam
+from warnings import warn
 
 from .utilities import *
 from ..components.networks import *
@@ -357,9 +358,7 @@ class DataHandle:
                     tec_data.name = tec_data.name + "_existing"
 
                     tec_data.existing = 1
-                    tec_data.input_parameters.size_initial = technologies_at_node[
-                        "existing"
-                    ][technology]
+                    tec_data.size_initial = technologies_at_node["existing"][technology]
                     tec_data.fit_technology_performance(
                         self.time_series[aggregation_model][investment_period][node][
                             "ClimateData"
@@ -391,6 +390,8 @@ class DataHandle:
             ) as json_file:
                 networks = json.load(json_file)
 
+            gammas = ["gamma1", "gamma2", "gamma3", "gamma4"]
+
             # New networks
             for network in networks["new"]:
 
@@ -417,25 +418,64 @@ class DataHandle:
                     sep=";",
                     index_col=0,
                 )
+                for gamma in gammas:
+                    if netw_data.capex_defined_per_arc:
+                        try:
+                            netw_data.gamma_per_arc[f"{gamma}"] = pd.read_csv(
+                                self.data_path
+                                / investment_period
+                                / "network_topology"
+                                / "new"
+                                / network
+                                / f"{gamma}.csv",
+                                sep=";",
+                                index_col=0,
+                            )
+                        except FileNotFoundError:
+                            raise FileNotFoundError(
+                                f"capex_defined_per_arc==1 for network {network}, a matrix needs to be provided for each gamma"
+                            )
+                    else:
+                        if os.path.isfile(
+                            self.data_path
+                            / investment_period
+                            / "network_topology"
+                            / "new"
+                            / network
+                            / f"{gamma}.csv",
+                        ):
+                            warn(
+                                f"capex_defined_per_arc==0, but you defined a file for each gamma parameter for network {network}"
+                            )
 
-                if os.path.isfile(
-                    self.data_path
-                    / investment_period
-                    / "network_topology"
-                    / "new"
-                    / network
-                    / "size_max_arcs.csv"
-                ):
-                    netw_data.size_max_arcs = pd.read_csv(
+                if netw_data.size_max_defined_per_arc:
+                    try:
+                        netw_data.size_max_arcs = pd.read_csv(
+                            self.data_path
+                            / investment_period
+                            / "network_topology"
+                            / "new"
+                            / network
+                            / "size_max_arcs.csv",
+                            sep=";",
+                            index_col=0,
+                        )
+                    except FileNotFoundError:
+                        raise FileNotFoundError(
+                            f" size_max_defined_per_arc==1 for network {network}, a matrix needs to be provided for size_max_arcs"
+                        )
+                else:
+                    if os.path.isfile(
                         self.data_path
                         / investment_period
                         / "network_topology"
                         / "new"
                         / network
-                        / "size_max_arcs.csv",
-                        sep=";",
-                        index_col=0,
-                    )
+                        / "size_max_arcs.csv"
+                    ):
+                        warn(
+                            f"size_max_defined_per_arc==0, but you defined a file for it for network {network}"
+                        )
 
                 netw_data.fit_network_performance()
                 self.network_data[investment_period][network] = netw_data
@@ -470,7 +510,38 @@ class DataHandle:
                     sep=";",
                     index_col=0,
                 )
-                netw_data.input_parameters.size_initial = pd.read_csv(
+
+                for gamma in gammas:
+                    if netw_data.capex_defined_per_arc:
+                        try:
+                            netw_data.gamma_per_arc[f"{gamma}"] = pd.read_csv(
+                                self.data_path
+                                / investment_period
+                                / "network_topology"
+                                / "existing"
+                                / network
+                                / f"{gamma}.csv",
+                                sep=";",
+                                index_col=0,
+                            )
+                        except FileNotFoundError:
+                            raise FileNotFoundError(
+                                f" capex_defined_per_arc==1 for network {network}, a matrix needs to be provided for each gamma"
+                            )
+                    else:
+                        if os.path.isfile(
+                            self.data_path
+                            / investment_period
+                            / "network_topology"
+                            / "existing"
+                            / network
+                            / f"{gamma}.csv",
+                        ):
+                            warn(
+                                f"capex_defined_per_arc==0, but you defined a file for each gamma parameter for network {network}"
+                            )
+
+                netw_data.size_initial = pd.read_csv(
                     self.data_path
                     / investment_period
                     / "network_topology"
