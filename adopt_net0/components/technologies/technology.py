@@ -1322,9 +1322,10 @@ class Technology(ModelComponent):
                 "opex_fixed_ccs", data=[model_block.var_opex_fixed_ccs.value]
             )
 
-        h5_group.create_dataset(
-            "para_unitCAPEX", data=[model_block.para_unit_capex.value]
-        )
+        if hasattr(model_block, "para_unit_capex"):
+            h5_group.create_dataset(
+                "para_unitCAPEX", data=[model_block.para_unit_capex.value]
+            )
         if hasattr(model_block, "para_fix_capex"):
             h5_group.create_dataset(
                 "para_fixCAPEX", data=[model_block.para_fix_capex.value]
