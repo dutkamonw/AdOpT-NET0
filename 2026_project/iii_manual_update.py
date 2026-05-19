@@ -191,7 +191,11 @@ def manual_update():
 
     topology["nodes"] = node_name_list
     topology["carriers"] = carrier_list
-
+    topology["investment_periods"] = ["period1"]
+    topology["start_date"] =  "2041-01-01 00:00"
+    topology["end_date"] = "2041-01-07 23:00"   # 1 week
+    topology["resolution"] = "1h"
+    
     with open(path_model_input / "Topology.json", "w") as json_file:
         json.dump(topology, json_file, indent=4)
  

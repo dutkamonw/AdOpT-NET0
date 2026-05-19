@@ -1128,7 +1128,7 @@ def create_gamma_matrix_V1(
             if cost_model_type == "pipeline":
                 for comp, (mn, mx) in component_limits.items():
                     if node_from in comp and node_to in comp:
-                        min_flow = 0  # Force min_flow to 0
+                        min_flow = mn
                         max_flow = mx
                         break
                 else:
@@ -1203,7 +1203,7 @@ def create_gamma_matrix(
             WHERE type = 'emitter'
         """).fetchdf()
     emitters["emission_TPH"] = pd.to_numeric(emitters["emission_TPH"], errors="coerce")
-    emitters = emitters.dropna(subset=["emission_TPH"])
+    emitters = emitters[emitters["emission_TPH"] > 0].dropna(subset=["emission_TPH"])
     emission_dict = dict(zip(emitters["name_sanitized"], emitters["emission_TPH"]))
 
     # 2. Load distance matrix (pipeline or ship)
@@ -1213,7 +1213,7 @@ def create_gamma_matrix(
     nodes = df_dist.index.tolist()
 
     # 3. Load connection matrix (always CO2_Pipeline/connection.csv)
-    df_conn = pd.read_csv(Path("3_model_inputs/period1/network_topology/new/CO2_Pipeline/connection.csv"), index_col=0, sep=";")
+    df_conn = pd.read_csv(Path(__file__).parent / "2_data_processed" / "network_topology_prep" / "CO2_Pipeline" / "connection.csv", index_col=0, sep=";")
     df_conn.index   = df_conn.index.astype(str)
     df_conn.columns = df_conn.columns.astype(str)
 
@@ -1222,12 +1222,16 @@ def create_gamma_matrix(
     G = nx.from_pandas_adjacency(df_conn)   # Function from_pandas_adjacency treats nonzero entries as edges; since connection matrix is binary, this gives us the connectivity graph.  
     
     # For each connected component, find the emitters in that component and calculate the min/max emissions to set massflow bounds.
+    # Minimum massflow the pipeline cost model can handle: velocity must be >= vRange_min (0.5 m/s) through the smallest NPS pipe (id ≈ 0.029 m, liquid CO2 density ≈ 850 kg/m³).
+    # 0.5 kg/s gives v ≈ 0.8 m/s through the smallest pipe → safely above 0.5 m/s.
+    min_kg_per_s_limit = 0.5
+
     component_limits = {}  
     for component in nx.connected_components(G):
         emissions_tph = [emission_dict[n] for n in component if n in emission_dict]
         if emissions_tph:
-            min_kg_per_s = 0.0      # Force min_flow to 0 for all arcs to allow partial flow
             max_kg_per_s = sum(emissions_tph) / 3.6
+            min_kg_per_s = min(emissions_tph) / 3.6
         else:
             min_kg_per_s = max_kg_per_s = 0.0
         component_limits[frozenset(component)] = (min_kg_per_s, max_kg_per_s)
@@ -1272,6 +1276,9 @@ def create_gamma_matrix(
                     break
             else:
                 continue  # skip 'node_from' not found in any component
+
+            if max_flow < min_kg_per_s_limit:
+                continue  # flow too small for pipeline cost model (velocity would be below vRange_min=0.5 m/s)
 
             # Build options
             if cost_model_type == "pipeline":

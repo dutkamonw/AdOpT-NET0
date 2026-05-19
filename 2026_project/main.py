@@ -28,11 +28,8 @@
 # 11) Update storage injection rate
 # 12) Apply carbon price to all nodes (Updating CarbonCost.csv)
 
-# Set time period
-# 13) Update Topology.json to set time period for the model 
-
 # Run the model
-# 14) Run the optimization model and generate results
+# 13) Run the optimization model and generate results
 
 ############################################################################################################################
 
@@ -66,9 +63,9 @@ db_path = script_dir / "database.duckdb"
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
 intialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
 raw_prep = False # Step 2) ETL raw data to database
-data_process = False # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
+data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
-manual_update_network = False  # Optional step (if there is a manual update on node selection and transportation routes))
+manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
 
 building_node_folder = True # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
@@ -248,14 +245,13 @@ if prepare_inputs:
         heat_nodes = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected WHERE type != 'storage' ").df()
     con.close()
 
-    for _, row in heat_nodes.iterrows():
-        adopt.fill_carrier_data(
-            folder_path=path_model_input,
-            value_or_data=2000,             # MWth limit for heat import, can be adjusted based on the context of the case study    
-            columns=["Import limit"],
-            carriers=["heat"],
-            investment_periods=["period1"],
-        )
+    adopt.fill_carrier_data(
+        folder_path=path_model_input,
+        value_or_data=2000,             # MWth limit for heat import, can be adjusted based on the context of the case study
+        columns=["Import limit"],
+        carriers=["heat"],
+        investment_periods=["period1"],
+    )
 
     ### Emission for each emitters
     #  For each emitter node, assign the emission_TPH value as 'Demand' for the corresponding subsector as carrier 
@@ -397,19 +393,7 @@ else:
 
 print("="*100)
 
-
-############################ 13) Optional : Update Topology.json time period ###############
-
-# Set 2041 to avoid leap year issue (2040 is a leap year, which might cause issue about time series)
-with open(path_model_input / "Topology.json", "r") as json_file:
-    topology = json.load(json_file)
-    topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-01-07 23:00"   # 1 week
-
-    with open(path_model_input / "Topology.json", "w") as json_file:
-        json.dump(topology, json_file, indent=4)
-
-############################ 14) Run the optimization model  ###############################
+############################ 13) Run the optimization model  ###############################
 
 if run_model:
     # Run the optimization model

@@ -3,8 +3,8 @@
 # This script is for data processing, which includes:
 
 # Network_topology_prep
-# 1) Build an N x N distance matrix, connection matrix and gamma matrix from ship_routes.distance_km and export as CSV
-# 2) Build an N x N distance matrix, connection matrix and gamma matrix from pipeline_routes.distance_km and export as CSV
+# 1) Build an N x N distance matrix, connection matrix and gamma matrix from pipeline
+# 2) Build an N x N distance matrix, connection matrix and gamma matrix from ship
 
 # Update Topology.json for create node folder directory (created template from 0_initialize_AdOpT-NET0.py)
 # 3) Update Topology.json to set nodes, carriers, and investment periods based on the data in database.duckdb
@@ -55,47 +55,8 @@ output_path_data_processed.mkdir(parents=True, exist_ok=True)
 
 def data_processing():
 
-################ 1) Build an N x N matrix from ship_routes.distance_km #####################
-    # The union of all ports from `from_port` and `to_port`
 
-    # ----- Create distance & connection matrices for ship -----
-    table_name='ship_routes'
-    col_start='from_port'
-    col_end='to_port'
-    value='distance_km'
-    output_path = output_path_data_processed / 'network_topology_prep' / 'CO2Ship' / 'distance.csv'
-    output_path.parent.mkdir(parents=True, exist_ok=True)   # Create network_topology_prep folder if it doesn't exist
-
-    # Distance matrix
-    matrix = create_matrix(table_name, col_start, col_end, value, output_path)
-    print(f"Created distance matrix for '{table_name}'")
-    print("---------------------")
-
-
-    # Connection matrix (binary adjacency: 1 if route exists, else 0)
-    matrix_binary = (matrix > 0).astype(int)
-    output_path = output_path_data_processed / 'network_topology_prep' / 'CO2Ship' / 'connection.csv'
-    matrix_binary.to_csv(output_path, index_label='BINARY', encoding='utf-8', sep=';')
-    print(f"Created connection matrix for '{table_name}'")
-    print("---------------------")
-
-
-    # ---- Create gamma matrix for Ship ----
-    create_gamma_matrix(
-        cost_model_type    = "ship",
-        table_name         ="combined_selected",  # To get emission data for massflow bounds
-        distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
-        discount_rate      = 0.10,      # Generic number
-        financial_year_out = 2025,
-        output_path        = output_path_data_processed / "network_topology_prep" / "CO2Ship",
-    )
-    print(f"Created gamma matrices for '{table_name}'")
-    print("---------------------")
-
-    
-
-
-################## 2) Build an N x N distance matrix and connection matrix from pipeline_network.distance_km ###################
+################## 1) Build an N x N distance matrix and connection matrix from pipeline_network.distance_km ###################
 
     # ----- Create distance matrix for pipeline -----
     table_name='pipeline_network'
@@ -133,6 +94,43 @@ def data_processing():
 
 
 
+################ 2) Build an N x N matrix from ship_routes.distance_km #####################
+    # The union of all ports from `from_port` and `to_port`
+
+    # ----- Create distance & connection matrices for ship -----
+    table_name='ship_routes'
+    col_start='from_port'
+    col_end='to_port'
+    value='distance_km'
+    output_path = output_path_data_processed / 'network_topology_prep' / 'CO2Ship' / 'distance.csv'
+    output_path.parent.mkdir(parents=True, exist_ok=True)   # Create network_topology_prep folder if it doesn't exist
+
+    # Distance matrix
+    matrix = create_matrix(table_name, col_start, col_end, value, output_path)
+    print(f"Created distance matrix for '{table_name}'")
+    print("---------------------")
+
+
+    # Connection matrix (binary adjacency: 1 if route exists, else 0)
+    matrix_binary = (matrix > 0).astype(int)
+    output_path = output_path_data_processed / 'network_topology_prep' / 'CO2Ship' / 'connection.csv'
+    matrix_binary.to_csv(output_path, index_label='BINARY', encoding='utf-8', sep=';')
+    print(f"Created connection matrix for '{table_name}'")
+    print("---------------------")
+
+
+    # ---- Create gamma matrix for Ship ----
+    create_gamma_matrix(
+        cost_model_type    = "ship",
+        table_name         ="combined_selected",  # To get emission data for massflow bounds
+        distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
+        discount_rate      = 0.10,      # Generic number
+        financial_year_out = 2025,
+        output_path        = output_path_data_processed / "network_topology_prep" / "CO2Ship",
+    )
+    print(f"Created gamma matrices for '{table_name}'")
+    print("---------------------")
+
 
 ##################### 3) Update Topology.json  #############################
     
@@ -159,6 +157,8 @@ def data_processing():
     topology["nodes"] = node_name_list
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
+    topology["start_date"] =  "2041-01-01 00:00"
+    topology["end_date"] = "2041-01-07 23:00"   # 1 week
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
