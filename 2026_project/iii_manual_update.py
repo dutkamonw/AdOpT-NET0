@@ -114,7 +114,6 @@ def manual_update():
         discount_rate      = 0.10,      # Generic number
         financial_year_out = 2025,
         output_path        = output_path_data_processed / "network_topology_prep" / "CO2Ship",
-        # connection_matrix: not needed — all arcs with distance > 0 are used
     )
     print(f"Manual update: Updated gamma matrices for '{table_name}'")
     print("---------------------")
@@ -149,7 +148,6 @@ def manual_update():
         discount_rate      = 0.10,              # Generic number
         financial_year_out = 2025,
         output_path        = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline",
-        connection_matrix  = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline" / "connection.csv",
     )
     print(f"Manual update: Updated gamma matrices for '{table_name}'")
     print("---------------------")
@@ -193,10 +191,6 @@ def manual_update():
 
     topology["nodes"] = node_name_list
     topology["carriers"] = carrier_list
-    topology["investment_periods"] = ["period1"]
-    topology["start_date"] =  "2040-01-01 00:00"
-    topology["end_date"] = "2040-12-31 23:00"
-    topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
         json.dump(topology, json_file, indent=4)

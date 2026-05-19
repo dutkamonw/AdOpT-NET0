@@ -83,12 +83,11 @@ def data_processing():
     # ---- Create gamma matrix for Ship ----
     create_gamma_matrix(
         cost_model_type    = "ship",
-        table_name         ="combined_selected",
+        table_name         ="combined_selected",  # To get emission data for massflow bounds
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
         discount_rate      = 0.10,      # Generic number
         financial_year_out = 2025,
         output_path        = output_path_data_processed / "network_topology_prep" / "CO2Ship",
-        # connection_matrix: not needed — all arcs with distance > 0 are used
     )
     print(f"Created gamma matrices for '{table_name}'")
     print("---------------------")
@@ -127,7 +126,6 @@ def data_processing():
         discount_rate      = 0.10,              # Generic number
         financial_year_out = 2025,
         output_path        = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline",
-        connection_matrix  = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline" / "connection.csv",
     )
     print(f"Created gamma matrices for '{table_name}'")
     print("---------------------")
@@ -161,8 +159,6 @@ def data_processing():
     topology["nodes"] = node_name_list
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
-    topology["start_date"] =  "2040-01-01 00:00"
-    topology["end_date"] = "2040-12-31 23:00"
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
@@ -222,10 +218,21 @@ def data_processing():
     with open(output_path / "CO2_Pipeline.json", "r") as json_file:
         pipeline = json.load(json_file)
     
-    pipeline["capex_defined_per_arc"] = 1 # To enable capex for individual arc
+    pipeline["capex_defined_per_arc"] = 1   # To enable capex for individual arc
+    pipeline["size_max"] = 1000             # Set a larger max size
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
+
+
+########################## 5) (c) Update CO2Ship.json #####################################
+    with open(output_path / "CO2Ship.json", "r") as json_file:
+        ship = json.load(json_file)
+    
+    ship["capex_defined_per_arc"] = 1   # To enable capex for individual arc
+
+    with open(output_path / "CO2Ship.json", "w") as json_file:
+        json.dump(ship, json_file, indent=4)
 
 
 ########################## 6) Create emitter_technology JSON files based on user input in excel file ##############################

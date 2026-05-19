@@ -28,8 +28,11 @@
 # 11) Update storage injection rate
 # 12) Apply carbon price to all nodes (Updating CarbonCost.csv)
 
+# Set time period
+# 13) Update Topology.json to set time period for the model 
+
 # Run the model
-# 13) Run the optimization model and generate results
+# 14) Run the optimization model and generate results
 
 ############################################################################################################################
 
@@ -172,12 +175,6 @@ if prepare_inputs:
     # Set value to define MIP gap for the optimization solver
     configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
 
-    # Reduce time resolution: 8784 hourly timesteps × 548+ arcs = ~5.7M constraints → MemoryError
-    # Use 12 typical days (12 × 24 = 288 timesteps) instead of full hourly resolution
-    configuration["optimization"]["typicaldays"]["N"]["value"] = 0 # try as Xiao
-
-    #configuration["reporting"]["case_name"]["value"] = f"case_study_{cab}"
-
     # Set result path
     configuration['reporting']['save_summary_path']['value'] = str(result_path)
     configuration['reporting']['save_path']['value'] = str(result_path)
@@ -236,19 +233,29 @@ if prepare_inputs:
     ### Default electricity/heat limits  
     adopt.fill_carrier_data(
         folder_path=path_model_input,
-        value_or_data=200,              # MWe limit for electricity import, can be adjusted based on the context of the case study
+        value_or_data=1000,              # MWe limit for electricity import, can be adjusted based on the context of the case study
         columns=["Import limit"],
         carriers=["electricity"],
         investment_periods=["period1"],
     )
 
-    adopt.fill_carrier_data(
-        folder_path=path_model_input,
-        value_or_data=400,             # MWth limit for heat import, can be adjusted based on the context of the case study    
-        columns=["Import limit"],
-        carriers=["heat"],
-        investment_periods=["period1"],
-    )
+
+    ### For heat, do not fill for starage
+    con = duckdb.connect(str(db_path))
+    try:
+        heat_nodes = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE type != 'storage' AND selection = 'Yes' ").df()
+    except:
+        heat_nodes = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected WHERE type != 'storage' ").df()
+    con.close()
+
+    for _, row in heat_nodes.iterrows():
+        adopt.fill_carrier_data(
+            folder_path=path_model_input,
+            value_or_data=2000,             # MWth limit for heat import, can be adjusted based on the context of the case study    
+            columns=["Import limit"],
+            carriers=["heat"],
+            investment_periods=["period1"],
+        )
 
     ### Emission for each emitters
     #  For each emitter node, assign the emission_TPH value as 'Demand' for the corresponding subsector as carrier 
@@ -373,7 +380,7 @@ if prepare_inputs:
     with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as f:
         node_names = json.load(f)["nodes"]
 
-    carbon_price = 150  # Assume €150/tonne CO2
+    carbon_price = 200  # Assume higher than Xiao's €150/tonne CO2
     success = 0
 
     for node in node_names:
@@ -390,7 +397,19 @@ else:
 
 print("="*100)
 
-############################# 13) Run the optimization model  ###############################
+
+############################ 13) Optional : Update Topology.json time period ###############
+
+# Set 2041 to avoid leap year issue (2040 is a leap year, which might cause issue about time series)
+with open(path_model_input / "Topology.json", "r") as json_file:
+    topology = json.load(json_file)
+    topology["start_date"] =  "2041-01-01 00:00"
+    topology["end_date"] = "2041-01-07 23:00"   # 1 week
+
+    with open(path_model_input / "Topology.json", "w") as json_file:
+        json.dump(topology, json_file, indent=4)
+
+############################ 14) Run the optimization model  ###############################
 
 if run_model:
     # Run the optimization model

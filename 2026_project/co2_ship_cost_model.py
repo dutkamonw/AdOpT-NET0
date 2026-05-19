@@ -47,10 +47,8 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
             ##### ---- Ship parameters ----
             ##  From 2025 Norther Light Annual Report    
             "ship_capacity_t": 7004.21,             # Northern Pioneer Capacity (7500 m3) * LCO2 density (-35 degC, 19 bar --> 1098.7 kg/m3 from NIST) * Utilization factor (0.85) (Footnote Table A.1)                      
-            ###  To be set by caller in EUR 2025
-            "I_c_EUR": None,                        # Cost per carrier (EUR/carrier) 
-            "c_st_EUR_per_t": None,                 # Cost of intermediate storage (EUR/t)
-            "c_l_EUR_per_t": None,                  # Cost of loading (EUR/t)
+            "c_ship_EUR_per_ship": 56_197_670,      # Cost per ship (EUR/ship), fixed capacity from Northern Pioneer (2025 Northern Light Annual Report)
+            "c_land_EUR": 4_018_490,                # Cost of intermediate (buffer) storage + loading station (EUR), fixed capacity from Northern Light site's land facilities and infrastructure (2025 Northern Light Annual Report)
             
 
             ##### ---- OPEX parameters -----
@@ -99,38 +97,27 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
         Returns total CAPEX in EUR 2025.
 
         CAPEX components:
-        1. Intermediate storage = Capacity (t) * Cost_of_intermediate_storage (EUR/t)  (Equation 8)
-        2. Loading station =  Mass_flow_CO2_transport (t/year) * Cost_of_loading (EUR/t) / CRF (Equation 10)
+        Cost of land facilities are sum of 1+2 (c_land_EUR):
+        1. Intermediate storage
+        2. Loading station
+        
+        Cost of ship (c_ship_EUR_per_ship) is calculated as:
         3. Carrier = Number_of_carriers * Cost per carrier (EUR/carrier)  (Equation 11)
         
-        Parameters:
-        - c_st_EUR_per_t: Cost of intermediate storage (EUR/t)
-        - c_l_EUR_per_t: Cost of loading (EUR/t)
-        - I_c_EUR: Cost per carrier (EUR/carrier)
 
         """
 
         # Unpack options for easier access
         o = self.options
-        crf = self._crf()
-
-        #########  CAPEX from Equation 8, 10, 11 in Oeuvray et al. (2024) #########
-        ### 1. Intermediate storage = Capacity (t) * Cost_of_intermediate_storage (EUR/t)  (Equation 8)
-        capex_storage = o["c_st_EUR_per_t"] * o["ship_capacity_t"]
-
-
-        ### 2. Loading station =  Mass_flow_CO2_transport (t/year) * Cost_of_loading (EUR/t) / CRF (Equation 10)
-        capex_loading = o["c_l_EUR_per_t"] * emission_tpa / crf
-        
 
         ### 3. Carrier = Number_of_carriers * Cost per carrier (EUR/carrier)  (Equation 11)
         n_shipments = emission_tpa / o["ship_capacity_t"]       # Number of shipments per year (Equation 2 in Oeuvray et al. (2024))
         round_trip_h = (2 * distance_km / o["ship_speed_km_per_h"]) + o["port_time_h"]  # Round trip duration (hours)
         n_carriers = n_shipments * round_trip_h / o["operating_hours_per_a"]    # Number of carriers (Equation 3 in Oeuvray et al. (2024))
-        capex_carrier = o["I_c_EUR"] * n_carriers
+        capex_carrier = o["c_ship_EUR_per_ship"] * n_carriers
 
-        # Total CAPEX = 1 + 2 + 3
-        capex = capex_storage + capex_loading + capex_carrier
+        # Total CAPEX = Intermediate storage + Loading station + Ship = 1 + 2 + 3
+        capex = o["c_land_EUR"] + capex_carrier
 
         return capex
 
