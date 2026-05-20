@@ -319,7 +319,7 @@ class Network(ModelComponent):
             b_arc = self._define_energyconsumption_arc(b_arc, b_netw)
 
             # Decommissioning only complete
-            if self.existing and self.decommission == "only_complete":
+            if self.existing and self.component_options.decommission == "only_complete":
                 b_arc = self._define_decommissioning_at_once_constraints(
                     b_arc, b_netw, node_from, node_to
                 )
@@ -561,7 +561,7 @@ class Network(ModelComponent):
         """
         coeff_ti = self.processed_coeff.time_independent
 
-        if self.size_is_int:
+        if self.component_options.size_is_int:
             size_domain = pyo.NonNegativeIntegers
         else:
             size_domain = pyo.NonNegativeReals
@@ -573,7 +573,7 @@ class Network(ModelComponent):
 
         b_arc.distance = self.distance.at[node_from, node_to]
 
-        if self.existing and self.decommission == "impossible":
+        if self.existing and self.component_options.decommission == "impossible":
             # Decommissioning is not possible, size fixed
             b_arc.var_size = pyo.Param(
                 within=size_domain,
@@ -676,7 +676,7 @@ class Network(ModelComponent):
         # For existing technologies it is used to calculate fixed OPEX
         b_arc.var_capex_aux = pyo.Var(bounds=calculate_max_capex())
 
-        if self.existing and self.decommission == "impossible":
+        if self.existing and self.component_options.decommission == "impossible":
             b_arc.var_capex = pyo.Param(domain=pyo.NonNegativeReals, initialize=0)
         else:
             b_arc.var_capex = pyo.Var(bounds=calculate_max_capex())
@@ -706,7 +706,7 @@ class Network(ModelComponent):
             )
 
         # CAPEX aux:
-        if self.existing and self.decommission == "impossible":
+        if self.existing and self.component_options.decommission == "impossible":
             if b_arc.var_size.value == 0:
                 b_arc.const_capex_aux = pyo.Constraint(expr=b_arc.var_capex_aux == 0)
             else:
@@ -735,7 +735,7 @@ class Network(ModelComponent):
 
         # CAPEX and CAPEX aux
         if self.existing:
-            if not self.decommission == "impossible":
+            if not self.component_options.decommission == "impossible":
                 b_arc.const_capex = pyo.Constraint(
                     expr=b_arc.var_capex
                     == (b_netw.para_size_initial[node_from, node_to] - b_arc.var_size)
@@ -853,7 +853,7 @@ class Network(ModelComponent):
         rated_capacity = coeff_ti["rated_capacity"]
 
         # Size in both direction is the same
-        if not self.existing or not self.decommission == "impossible":
+        if not self.existing or not self.component_options.decommission == "impossible":
 
             def init_size_bidirectional(const, node_from, node_to):
                 return (
