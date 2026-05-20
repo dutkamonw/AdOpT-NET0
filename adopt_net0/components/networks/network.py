@@ -199,15 +199,16 @@ class Network(ModelComponent):
         """
         Fits network performance (bounds and coefficients).
         """
+        input_parameters = self.input_parameters
         time_independent = {}
 
         # Size
-        time_independent["size_min"] = self.size_min
+        time_independent["size_min"] = input_parameters.size_min
         if not self.existing:
-            time_independent["size_max"] = self.size_max
+            time_independent["size_max"] = input_parameters.size_max
         else:
-            time_independent["size_max"] = self.size_initial
-            time_independent["size_initial"] = self.size_initial
+            time_independent["size_max"] = input_parameters.size_initial
+            time_independent["size_initial"] = input_parameters.size_initial
 
         if self.existing == 0:
             if self.size_max_defined_per_arc:
@@ -225,7 +226,7 @@ class Network(ModelComponent):
             time_independent["size_max_arcs"] = time_independent["size_initial"]
 
         time_independent["rated_capacity"] = get_attribute_from_dict(
-            self.performance_data, "rated_capacity", 1
+            input_parameters.performance_data, "rated_capacity", 1
         )
 
         # Cost parameters
@@ -238,14 +239,14 @@ class Network(ModelComponent):
             gammas = ["gamma1", "gamma2", "gamma3", "gamma4"]
             for gamma in gammas:
                 time_independent["cost_per_arc"][gamma] = pd.DataFrame(
-                    self.economics[gamma],
+                    self.economics.capex_data[gamma],
                     index=self.distance.index,
                     columns=self.distance.columns,
                 )
 
         # Other
-        time_independent["min_transport"] = self.performance_data["min_transport"]
-        time_independent["loss"] = self.performance_data["loss"]
+        time_independent["min_transport"] = input_parameters.performance_data["min_transport"]
+        time_independent["loss"] = input_parameters.performance_data["loss"]
 
         # Write to self
         self.processed_coeff.time_independent = time_independent
