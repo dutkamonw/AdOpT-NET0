@@ -461,10 +461,10 @@ class Network(ModelComponent):
         economics = self.economics
 
         b_netw.para_opex_variable = pyo.Param(
-            domain=pyo.Reals, initialize=economics["opex_variable"], mutable=True
+            domain=pyo.Reals, initialize=economics.opex_variable, mutable=True
         )
         b_netw.para_opex_fixed = pyo.Param(
-            domain=pyo.Reals, initialize=economics["opex_fixed"], mutable=True
+            domain=pyo.Reals, initialize=economics.opex_fixed, mutable=True
         )
 
         b_netw.var_opex_variable = pyo.Var(self.set_t)
@@ -619,7 +619,7 @@ class Network(ModelComponent):
 
         # CAPEX
         annualization_factor = annualize(
-            discount_rate, economics["lifetime"], fraction_of_year_modelled
+            discount_rate, economics.lifetime, fraction_of_year_modelled
         )
 
         b_arc.para_capex_gamma1 = pyo.Param(
@@ -646,7 +646,7 @@ class Network(ModelComponent):
         if self.existing:
             b_arc.para_decommissioning_cost_annual = pyo.Param(
                 domain=pyo.Reals,
-                initialize=economics["decommission_cost"] * annualization_factor,
+                initialize=economics.decommission_cost * annualization_factor,
                 mutable=True,
             )
 
@@ -953,7 +953,7 @@ class Network(ModelComponent):
         discount_rate = set_discount_rate(config, economics)
         fraction_of_year_modelled = data["topology"]["fraction_of_year_modelled"]
         annualization_factor = annualize(
-            discount_rate, economics["lifetime"], fraction_of_year_modelled
+            discount_rate, economics.lifetime, fraction_of_year_modelled
         )
 
         if self.bidirectional_network:
@@ -1100,7 +1100,7 @@ class Network(ModelComponent):
         discount_rate = set_discount_rate(config, economics)
         fraction_of_year_modelled = data.topology["fraction_of_year_modelled"]
         annualization_factor = annualize(
-            discount_rate, economics["lifetime"], fraction_of_year_modelled
+            discount_rate, economics.lifetime, fraction_of_year_modelled
         )
 
         for arc_name in model_block.set_arcs:
