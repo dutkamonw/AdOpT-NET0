@@ -1,3 +1,4 @@
+
 import h5py
 import pandas as pd
 import numpy as np
@@ -8,7 +9,24 @@ import networkx as nx
 from pathlib import Path
 from adopt_net0.result_management.read_results import extract_datasets_from_h5group
 
-h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260520004131-1\optimization_results.h5")
+# Load storage/port node sets from combined_selected_manual_edit.xlsx
+storage_nodes_set = set()
+port_nodes_set = set()
+try:
+    df_nodes = pd.read_excel(
+        Path(__file__).parent / "2_data_processed" / "intermediate_output" / "combined_selected_manual_edit.xlsx"
+    )
+    if "name_sanitized" in df_nodes.columns and "type" in df_nodes.columns:
+        storage_nodes_set = set(
+            df_nodes[df_nodes["type"].str.lower().str.contains("storage", na=False)]["name_sanitized"].astype(str).str.strip()
+        )
+        port_nodes_set = set(
+            df_nodes[df_nodes["type"].str.lower().str.contains("port", na=False)]["name_sanitized"].astype(str).str.strip()
+        )
+except Exception as e:
+    print(f"[WARN] Could not load storage/port node sets: {e}")
+
+h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260520033640-1\optimization_results.h5")
 node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
 output_excel  = h5_file.parent / "results.xlsx"
 output_map    = h5_file.parent / "network_map.html"
@@ -431,10 +449,17 @@ def lookup_coords(name):
     return node_coords_norm.get(normalize(repaired))
 
 # Build map
-m = folium.Map(location=[38.0, 15.0], zoom_start=5,
-               tiles="CartoDB positron")
 
-network_colors = {"CO2_Pipeline": "#1f77b4", "CO2Ship": "#d62728"}
+# Create map with no base tiles, then add custom tile layer with opacity
+m = folium.Map(location=[38.0, 15.0], zoom_start=5, tiles=None)
+folium.TileLayer(
+    tiles="CartoDB positron",
+    name="Base Map",
+    control=False,
+    opacity=0.75
+).add_to(m)
+
+network_colors = {"CO2_Pipeline": "#000000", "CO2Ship": "#1900ff"}
 
 layers = {
         "CO2_Pipeline_active": folium.FeatureGroup(name="CO2_Pipeline (Active)", show=True),
@@ -483,11 +508,16 @@ for _, row in all_arcs_map.iterrows():
     is_active = row["status"] == "Active"
     layer_key = f"{row['mode']}_{'active' if is_active else 'inactive'}"
 
+    # Set pipeline opacity to 0.75, others unchanged
+    if row["mode"] == "CO2_Pipeline":
+        opacity_val = 0.75
+    else:
+        opacity_val = 0.85 if is_active else 0.45
     line = folium.PolyLine(
         locations=route_locations,
-        color=network_colors.get(row["mode"], "gray") if is_active else "#8a8a8a",
+        color=network_colors.get(row["mode"], "gray") if is_active else "#191818",
         weight=base_weight,
-        opacity=0.85 if is_active else 0.45,
+        opacity=opacity_val,
         dash_array=None if is_active else "6, 8",
         tooltip=(
             f"<b>{row['mode']}</b><br>"
@@ -524,46 +554,81 @@ if max_emission <= 0:
 
 node_js_meta = []
 
+
 for node_name, (lat, lon) in node_coords_orig.items():
-    is_active = (node_name in active_nodes_set) or \
-                (normalize(node_name) in active_nodes_norm)
+    is_active = (node_name in active_nodes_set) or (normalize(node_name) in active_nodes_norm)
     emission_val = node_emission_map_orig.get(normalize(repair_name(node_name)), 0.0)
     emission_radius = 3.0 + (emission_val / max_emission) * 9.0
     equal_radius = 6.0
 
-    node = folium.CircleMarker(
-        location=[lat, lon],
-        radius=emission_radius,
-        color="#d62728" if is_active else "#aaaaaa",
-        fill=True,
-        fill_color="#d62728" if is_active else "#cccccc",
-        fill_opacity=0.85,
-        tooltip=f"<b>{node_name}</b><br>"
-                f"<b>Status:</b> {'Active' if is_active else 'Inactive'}<br>"
-                f"<b>Emission:</b> {emission_val:,.2f} t/h"
-    )
-    node.add_to(node_layer)
+    # Node type detection (by name_sanitized)
+    node_name_norm = normalize(repair_name(node_name))
+    marker = None
+    if node_name_norm in storage_nodes_set:
+        # Storage: blue circle
+        marker = folium.CircleMarker(
+            location=[lat, lon],
+            radius=emission_radius,
+            color="#0074D9",
+            fill=True,
+            fill_color="#0074D9",
+            fill_opacity=0.85,
+            tooltip=f"<b>{node_name}</b><br><b>Type:</b> Storage<br>"
+                    f"<b>Status:</b> {'Active' if is_active else 'Inactive'}<br>"
+                    f"<b>Emission:</b> {emission_val:,.2f} t/h"
+        )
+    elif node_name_norm in port_nodes_set:
+        # Port: green triangle
+        marker = folium.RegularPolygonMarker(
+            location=[lat, lon],
+            number_of_sides=3,
+            radius=emission_radius,
+            color="#2ECC40",
+            fill=True,
+            fill_color="#2ECC40",
+            fill_opacity=0.85,
+            rotation=0,
+            tooltip=f"<b>{node_name}</b><br><b>Type:</b> Port<br>"
+                    f"<b>Status:</b> {'Active' if is_active else 'Inactive'}<br>"
+                    f"<b>Emission:</b> {emission_val:,.2f} t/h"
+        )
+    else:
+        # Default: red/gray circle
+        marker = folium.CircleMarker(
+            location=[lat, lon],
+            radius=emission_radius,
+            color="#d62728" if is_active else "#3A3939",
+            fill=True,
+            fill_color="#d62728" if is_active else "#3A3939",
+            fill_opacity=0.85,
+            tooltip=f"<b>{node_name}</b><br>"
+                    f"<b>Status:</b> {'Active' if is_active else 'Inactive'}<br>"
+                    f"<b>Emission:</b> {emission_val:,.2f} t/h"
+        )
+    marker.add_to(node_layer)
     node_js_meta.append({
-        "id": node.get_name(),
+        "id": marker.get_name(),
         "equalRadius": equal_radius,
         "emissionRadius": emission_radius,
     })
 
 legend_html = """
 <div style="position:fixed; bottom:30px; left:30px; z-index:1000;
-     background:white; padding:15px; border-radius:8px;
-     border:1px solid #ccc; font-size:13px; line-height:2;">
-    <b>CO2 Transport Route</b><br>
-    <span style="color:#1f77b4; font-size:18px;">━━</span> Pipeline (Active)<br>
-    <span style="color:#8a8a8a; font-size:18px;">- - -</span> Pipeline (Inactive)<br>
-    <span style="color:#d62728; font-size:18px;">━━</span> Ship (Active)<br>
-    <span style="color:#8a8a8a; font-size:18px;">- - -</span> Ship (Inactive)<br>
-  <hr style="margin:6px 0">
-  <b>Node</b><br>
-    <span style="color:#d62728;">●</span> Active Node<br>
-    <span style="color:#aaa;">●</span> Inactive Node<br>
-  <hr style="margin:6px 0">
-    <i style="font-size:11px">Arc thickness follows capacity. Controls are on top-right.</i>
+         background:white; padding:15px; border-radius:8px;
+         border:1px solid #ccc; font-size:13px; line-height:2;">
+        <b>CO2 Transport Route</b><br>
+        <span style="color:#000000; font-size:18px;">━━</span> Pipeline (Active)<br>
+        <span style="color:#191818; font-size:18px;">- - -</span> Pipeline (Inactive)<br>
+        <span style="color:#1900ff; font-size:18px;">━━</span> Ship (Active)<br>
+        <span style="color:#8a8a8a; font-size:18px;">- - -</span> Ship (Inactive)<br>
+    <hr style="margin:6px 0">
+    <b>Node</b><br>
+        <span style="color:#d62728;">●</span> Active Node<br>
+        <span style="color:#3A3939;">●</span> Inactive Node<br>
+        <span style="color:#0074D9;">●</span> Storage Node<br>
+        <span style="color:#2ECC40;">▲</span> Port Node<br>
+    <hr style="margin:6px 0">
+        <i style="font-size:11px">Arc thickness follows capacity. Controls are on top-right.</i>
 </div>
 """
 
@@ -595,7 +660,7 @@ map_var = m.get_name()
 arc_js = json.dumps(arc_js_meta)
 node_js = json.dumps(node_js_meta)
 
-script = f"""
+m_script = f"""
 <script>
 (function() {{
     var mapObj = {map_var};
@@ -633,15 +698,19 @@ script = f"""
         arcSlider.addEventListener('input', applyArcScale);
         nodeSlider.addEventListener('input', applyNodeScale);
         nodeMode.addEventListener('change', applyNodeScale);
+        // Always update values on load
         applyArcScale();
         applyNodeScale();
+        // Also update value displays immediately
+        document.getElementById('arcScaleValue').textContent = arcSlider.value + 'x';
+        document.getElementById('nodeScaleValue').textContent = nodeSlider.value + 'x';
     }}
 
     mapObj.whenReady(initControls);
 }})();
 </script>
 """
-m.get_root().html.add_child(folium.Element(script))
+m.get_root().html.add_child(folium.Element(m_script))
 folium.LayerControl(collapsed=False).add_to(m)
 m.save(str(output_map))
 print(f"✅ Map saved → {output_map}")
