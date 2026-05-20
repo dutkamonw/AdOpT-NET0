@@ -64,6 +64,27 @@ from co2_ship_cost_model import CO2_Ship_Dedicated_CostModel
 DB_PATH = str(Path(__file__).resolve().parent / 'database.duckdb')
 
 
+def _resolve_financial_year_for_inflation(requested_year: int) -> int:
+    """Return a year available in producer_price_index_euro.csv (fallback to latest <= requested)."""
+    ppi_path = Path(__file__).resolve().parent.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro.csv"
+    ppi = pd.read_csv(ppi_path)
+    years = sorted(pd.to_datetime(ppi["TIME_PERIOD"]).dt.year.unique().tolist())
+    if requested_year in years:
+        return int(requested_year)
+
+    valid = [y for y in years if y <= requested_year]
+    if valid:
+        fallback = int(valid[-1])
+    else:
+        fallback = int(years[0])
+
+    print(
+        f"Requested financial_year_out={requested_year} not in PPI dataset; "
+        f"using {fallback} for currency/inflation conversion."
+    )
+    return fallback
+
+
 ############# 0. Sanitize name function  #########################################
 
 def sanitize_name(name):
@@ -526,8 +547,11 @@ def combine_all_selected(output_path):
     con.execute("CREATE OR REPLACE TABLE combined_selected AS SELECT * FROM combined_selected")
     con.close()
 
-    # Export combined_selected to excel for manual checking
-    combined_selected.to_excel(Path(output_path) / 'combined_selected.xlsx', index=False)
+    # Export combined_selected to excel for manual checking (non-fatal if file is locked)
+    try:
+        combined_selected.to_excel(Path(output_path) / 'combined_selected.xlsx', index=False)
+    except PermissionError:
+        print("WARNING: Could not write combined_selected.xlsx (file may be open in Excel). Database was updated successfully.")
     
     return combined_selected
 
@@ -1097,6 +1121,9 @@ def create_gamma_matrix_V1(
     else:
         raise ValueError(f"Invalid cost_model_type: {cost_model_type}. Must be 'pipeline' or 'ship'.")
     
+    # Ensure conversion year exists in PPI dataset to avoid NaN currency conversion.
+    financial_year_out_resolved = _resolve_financial_year_for_inflation(financial_year_out)
+
     # 4. Instantiate cost model 
     
     if cost_model_type == "pipeline":
@@ -1143,7 +1170,7 @@ def create_gamma_matrix_V1(
                     "massflow_min_kg_per_s": min_flow,
                     "massflow_max_kg_per_s": max_flow,
                     "discount_rate":         discount_rate,
-                    "financial_year_out":    financial_year_out,
+                    "financial_year_out":    financial_year_out_resolved,
                     "currency_out":          "EUR",
                     "terrain":               "Onshore",
                 }
@@ -1153,7 +1180,7 @@ def create_gamma_matrix_V1(
                     "massflow_min_kg_per_s": min_flow,
                     "massflow_max_kg_per_s": max_flow,
                     "discount_rate":         discount_rate,
-                    "financial_year_out":    financial_year_out,
+                    "financial_year_out":    financial_year_out_resolved,
                     "currency_out":          "EUR",
                 }
 
@@ -1195,6 +1222,9 @@ def create_gamma_matrix(
                      max_flow = sum(emitter emissions in component) → drives n_shipments.
     """
 
+    # Ensure conversion year exists in PPI dataset to avoid NaN currency conversion.
+    financial_year_out_resolved = _resolve_financial_year_for_inflation(financial_year_out)
+
     # 1. Load emitters
     with duckdb.connect(DB_PATH) as con:
         emitters = con.execute(f"""
@@ -1232,6 +1262,9 @@ def create_gamma_matrix(
         if emissions_tph:
             max_kg_per_s = sum(emissions_tph) / 3.6
             min_kg_per_s = min(emissions_tph) / 3.6
+            # Ensure regression has a valid flow range even for single-emitter components.
+            if max_kg_per_s > 0 and np.isclose(min_kg_per_s, max_kg_per_s):
+                min_kg_per_s = max(min_kg_per_s_limit, 0.5 * max_kg_per_s)
         else:
             min_kg_per_s = max_kg_per_s = 0.0
         component_limits[frozenset(component)] = (min_kg_per_s, max_kg_per_s)
@@ -1249,6 +1282,9 @@ def create_gamma_matrix(
         g: pd.DataFrame(0.0, index=nodes, columns=nodes)
         for g in ["gamma1", "gamma2", "gamma3", "gamma4"]
     }
+
+    n_calculated = 0
+    n_skipped_nonfinite = 0
 
     # 7. Compute gamma per arc
     for node_from in nodes:
@@ -1280,6 +1316,12 @@ def create_gamma_matrix(
             if max_flow < min_kg_per_s_limit:
                 continue  # flow too small for pipeline cost model (velocity would be below vRange_min=0.5 m/s)
 
+            # Guard against degenerate/invalid ranges before running OLS-based models.
+            if min_flow >= max_flow:
+                min_flow = max(min_kg_per_s_limit, 0.5 * max_flow)
+            if min_flow >= max_flow:
+                continue
+
             # Build options
             if cost_model_type == "pipeline":
                 options = {
@@ -1287,7 +1329,7 @@ def create_gamma_matrix(
                     "massflow_min_kg_per_s": min_flow,
                     "massflow_max_kg_per_s": max_flow,
                     "discount_rate":         discount_rate,
-                    "financial_year_out":    financial_year_out,
+                    "financial_year_out":    financial_year_out_resolved,
                     "currency_out":          "EUR",
                     "terrain":               "Onshore",
                 }
@@ -1297,15 +1339,22 @@ def create_gamma_matrix(
                     "massflow_min_kg_per_s": min_flow,   # min single emitter in component
                     "massflow_max_kg_per_s": max_flow,   # sum of all emitters in component
                     "discount_rate":         discount_rate,
-                    "financial_year_out":    financial_year_out,
+                    "financial_year_out":    financial_year_out_resolved,
                     "currency_out":          "EUR",
                     # c_ship_EUR_per_ship, c_land_EUR → use defaults from model
                 }
 
             # Run model and store gamma values
             model.calculate_indicators(options)
-            gamma_matrices["gamma1"].at[node_from, node_to] = model.financial_indicators["gamma1"]
-            gamma_matrices["gamma2"].at[node_from, node_to] = model.financial_indicators["gamma2"]
+            g1 = pd.to_numeric(model.financial_indicators.get("gamma1"), errors="coerce")
+            g2 = pd.to_numeric(model.financial_indicators.get("gamma2"), errors="coerce")
+            if pd.isna(g1) or pd.isna(g2):
+                n_skipped_nonfinite += 1
+                continue
+
+            gamma_matrices["gamma1"].at[node_from, node_to] = float(g1)
+            gamma_matrices["gamma2"].at[node_from, node_to] = float(g2)
+            n_calculated += 1
             # gamma3 & gamma4 remain 0.0
 
     # 8. Export CSVs
@@ -1313,6 +1362,11 @@ def create_gamma_matrix(
     output_path.mkdir(parents=True, exist_ok=True)
     for name, df in gamma_matrices.items():
         df.to_csv(output_path / f"{name}.csv", sep=";", float_format="%.4f", index_label="NODE")
+
+    print(
+        f"Gamma matrix ({cost_model_type}) computed arcs: {n_calculated}, "
+        f"skipped non-finite arcs: {n_skipped_nonfinite}"
+    )
 
     return gamma_matrices
 

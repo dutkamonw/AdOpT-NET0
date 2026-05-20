@@ -70,7 +70,7 @@ manual_update_network = True  # Optional step (if there is a manual update on no
 building_node_folder = True # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = True # Step 13) run the optimization model
+run_model = False # Step 13) run the optimization model
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -85,7 +85,15 @@ if intialize:
     adopt.create_input_data_folder_template(path_model_input)
     print("Initializing the template: Completed")
     # Replace the default producer price index data with the updated 2025 PPI data
-    shutil.copy2(script_dir / "1_raw" /"producer_price_index_euro.csv",  script_dir.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro.csv")
+    ppi_src = script_dir / "1_raw" / "producer_price_index_euro.csv"
+    ppi_workspace = script_dir.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro.csv"
+    shutil.copy2(ppi_src, ppi_workspace)
+    # Also copy to the installed site-packages version (imported when running from 2026_project/)
+    import adopt_net0 as _adopt_net0_pkg
+    ppi_installed = Path(_adopt_net0_pkg.__file__).parent / "database" / "data" / "producer_price_index_euro.csv"
+    if ppi_installed.resolve() != ppi_workspace.resolve():
+        shutil.copy2(ppi_src, ppi_installed)
+        print(f"  PPI also copied to installed package: {ppi_installed}")
 
 else:
     print("Skipped initializing the template")

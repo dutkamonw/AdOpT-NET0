@@ -61,8 +61,11 @@ def etl_raw_to_db():
 
     ################ 3) Combine all selected data into one table ################
     combined_selected = combine_all_selected(output_path_intermediate_result)
-    # Export combined_selected to excel for manual checking
-    combined_selected.to_excel(Path(output_path_intermediate_result) / 'combined_selected.xlsx', index=False)
+    # Export combined_selected to excel for manual checking (non-fatal if file is locked)
+    try:
+        combined_selected.to_excel(Path(output_path_intermediate_result) / 'combined_selected.xlsx', index=False)
+    except PermissionError:
+        print("WARNING: Could not write combined_selected.xlsx (file may be open in Excel). Continuing pipeline.")
 
     ################ 4)  Create ship routes data using SCGraph ################
     create_ship_routes(output_path_intermediate_result)
