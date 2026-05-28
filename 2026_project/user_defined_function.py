@@ -52,8 +52,7 @@ import shutil
 
 import networkx as nx
 from adopt_net0.database.components.networks import CO2_Pipeline_CostModel
-from adopt_net0.database.utilities import correct_inflation
-from co2_ship_cost_model import CO2_Ship_Dedicated_CostModel
+from co2_ship_cost_model_V1 import CO2_Ship_Dedicated_CostModel
 
 
 
@@ -1033,7 +1032,7 @@ def create_matrix(table_name, col_start, col_end, value, output_path):
 ########################## 6. (b) Create matrix for gamma ##############################
 
 # Version 1:  massflow bounds of pipeline arcs are based on the min/max emission of the connected group, while massflow bounds of ship arcs are based on the ship capacity.
-def create_gamma_matrix_V1(
+def create_gamma_matrix_v1(
     cost_model_type:    str,      # "pipeline" or "ship"
     table_name:         str,      # database table to query for emission data
     distance_matrix:    Path,
@@ -1262,9 +1261,7 @@ def create_gamma_matrix(
         if emissions_tph:
             max_kg_per_s = sum(emissions_tph) / 3.6
             min_kg_per_s = min(emissions_tph) / 3.6
-            # Ensure regression has a valid flow range even for single-emitter components.
-            if max_kg_per_s > 0 and np.isclose(min_kg_per_s, max_kg_per_s):
-                min_kg_per_s = max(min_kg_per_s_limit, 0.5 * max_kg_per_s)
+
         else:
             min_kg_per_s = max_kg_per_s = 0.0
         component_limits[frozenset(component)] = (min_kg_per_s, max_kg_per_s)

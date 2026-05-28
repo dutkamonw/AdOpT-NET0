@@ -3,11 +3,17 @@ import h5py
 import pandas as pd
 import numpy as np
 import folium
+from folium.plugins import PolyLineTextPath
 import unicodedata
 import json
 import networkx as nx
+import sys
 from pathlib import Path
+import duckdb
 from adopt_net0.result_management.read_results import extract_datasets_from_h5group
+
+# Ensure UTF-8 output to terminal to avoid encoding errors with non-ASCII node names
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Load storage/port node sets from combined_selected_manual_edit.xlsx
 storage_nodes_set = set()
@@ -26,7 +32,21 @@ try:
 except Exception as e:
     print(f"[WARN] Could not load storage/port node sets: {e}")
 
-h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260520033640-1\optimization_results.h5")
+# ── Load iso2 map from database ──────────────────────────
+db_path = Path(__file__).parent / "database.duckdb"
+node_iso2_map = {}   # name_sanitized -> iso2
+try:
+    con = duckdb.connect(str(db_path), read_only=True)
+    iso2_df = con.execute(
+        "SELECT name_sanitized, iso2 FROM combined_selected_final WHERE name_sanitized IS NOT NULL AND iso2 IS NOT NULL"
+    ).df()
+    con.close()
+    node_iso2_map = dict(zip(iso2_df["name_sanitized"].astype(str).str.strip(),
+                             iso2_df["iso2"].astype(str).str.strip()))
+except Exception as e:
+    print(f"[WARN] Could not load iso2 map from database: {e}")
+
+h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260527141038-1\optimization_results.h5")
 node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
 output_excel  = h5_file.parent / "results.xlsx"
 output_map    = h5_file.parent / "network_map.html"
@@ -44,7 +64,6 @@ name_repair = {
         "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÇ DELS HORTS)",
     "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi":
         "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
-    "HESTAMBIENTE S.R.L":  "HERAMBIENTE S.R.L.",
     "EVERÃ‰ SAS":          "ÉVERÉ SAS",
 }
 
@@ -319,7 +338,7 @@ arc_cols = ["mode","fromNode","toNode","size","total_flow",
             "total_emissions","capex","opex_fixed","opex_variable",
             "para_capex_gamma1","para_capex_gamma2",
             "para_capex_gamma3","para_capex_gamma4"]
-arc_cols = [c for c in arc_cols if c in active_arcs.columns]
+arc_cols = [c for c in arc_cols if c in networks_wide.columns]
 
 node_cols = ["node","role","technology","existing","size","size_ccs",
              "capex_tec","capex_ccs","capex_tot",
@@ -327,21 +346,235 @@ node_cols = ["node","role","technology","existing","size","size_ccs",
              "emissions_pos","emissions_neg","para_unitCAPEX"]
 node_cols = [c for c in node_cols if c in active_nodes.columns]
 
+# ── Combined Node sheet (active + inactive, with status & iso2) ──
+active_nodes["status"] = "active"
+inactive_nodes["status"] = "inactive"
+nodes_combined = pd.concat([active_nodes, inactive_nodes], ignore_index=True)
+nodes_combined["iso2"] = nodes_combined["node"].map(
+    lambda n: node_iso2_map.get(str(n).strip(), "")
+)
+combined_node_cols = ["node","status","iso2","role","technology","existing","size","size_ccs",
+                      "capex_tec","capex_ccs","capex_tot",
+                      "opex_fixed_tot","opex_fixed_ccs","opex_variable",
+                      "emissions_pos","emissions_neg","para_unitCAPEX"]
+combined_node_cols = [c for c in combined_node_cols if c in nodes_combined.columns]
+nodes_combined_out = nodes_combined[combined_node_cols].sort_values(
+    ["status","role","node"]).reset_index(drop=True)
+nodes_combined_out.index += 1
+
+# ── Combined Arc sheet (active + inactive, with status & fromNode iso2) ──
+active_arcs["status"] = "active"
+inactive_arcs["status"] = "inactive"
+arcs_combined = pd.concat([active_arcs, inactive_arcs], ignore_index=True)
+arcs_combined["iso2"] = arcs_combined["fromNode"].map(
+    lambda n: node_iso2_map.get(str(n).strip(), "")
+)
+combined_arc_cols = ["mode","status","fromNode","iso2","toNode","size","total_flow",
+                     "total_emissions","capex","opex_fixed","opex_variable",
+                     "para_capex_gamma1","para_capex_gamma2",
+                     "para_capex_gamma3","para_capex_gamma4"]
+combined_arc_cols = [c for c in combined_arc_cols if c in arcs_combined.columns]
+arcs_combined_out = arcs_combined[combined_arc_cols].sort_values(
+    ["mode","status","size"], ascending=[True,True,False]).reset_index(drop=True)
+arcs_combined_out.index += 1
+
+# Keep legacy subsets for the map / sanity checks
 active_arcs_out  = active_arcs[arc_cols].sort_values(
     ["mode","size"], ascending=[True,False]).reset_index(drop=True)
 active_arcs_out.index += 1
-
-inactive_arcs_out = inactive_arcs[arc_cols].sort_values(
-    ["mode","size"], ascending=[True,False]).reset_index(drop=True)
-inactive_arcs_out.index += 1
 
 active_nodes_out = active_nodes[node_cols].sort_values(
     ["role","node"]).reset_index(drop=True)
 active_nodes_out.index += 1
 
-inactive_nodes_out = inactive_nodes[node_cols].sort_values(
-    ["role","node"]).reset_index(drop=True)
-inactive_nodes_out.index += 1
+# ══════════════════════════════════════════════════════════
+# PARAMETERS SHEET
+# ══════════════════════════════════════════════════════════
+def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
+    """Collect key model parameters from ConfigModel.json, network JSONs,
+    CarbonCost.csv, and the H5 summary into a tidy DataFrame."""
+    rows = []
+    base = h5_file_path.parent.parent.parent  # 2026_project/
+    period_dir = base / "3_model_inputs" / "period1"
+
+    # ── ConfigModel.json ──────────────────────────────────
+    cfg_path = base / "3_model_inputs" / "ConfigModel.json"
+    try:
+        with open(cfg_path) as fh:
+            cfg = json.load(fh)
+        def _cfg(section, key, unit="", description=""):
+            val = cfg.get(section, {}).get(key, {}).get("value", "N/A")
+            rows.append({"parameter": f"{section}.{key}", "value": val,
+                         "unit": unit, "description": description, "source": "ConfigModel.json"})
+        _cfg("optimization", "objective", description="Optimization objective")
+        _cfg("optimization", "emission_limit", "t CO2", "Emission limit (if objective = costs_emissionlimit)")
+        _cfg("optimization", "pareto_points", description="Number of Pareto points")
+        _cfg("solveroptions", "solver", description="Solver")
+        _cfg("solveroptions", "mipgap", description="MIP gap tolerance")
+        _cfg("solveroptions", "timelim", "h", "Solver time limit")
+        _cfg("energybalance", "copperplate", description="Copper-plate energy balance (1=yes)")
+        _cfg("economic", "global_discountrate", description="Global discount rate (-1 = per-technology)")
+    except Exception as e:
+        rows.append({"parameter": "ConfigModel", "value": str(e), "unit": "", "description": "Error loading", "source": "ConfigModel.json"})
+
+    # ── Carbon cost ───────────────────────────────────────
+    try:
+        node_data_dir = period_dir / "node_data"
+        cc_val = None
+        for node_dir in sorted(node_data_dir.iterdir()):
+            cc_csv = node_dir / "CarbonCost.csv"
+            if cc_csv.exists():
+                df_cc = pd.read_csv(cc_csv, sep=";")
+                if "price" in df_cc.columns:
+                    cc_val = pd.to_numeric(df_cc["price"], errors="coerce").dropna().iloc[0]
+                    break
+        rows.append({"parameter": "carbon_price", "value": cc_val if cc_val is not None else "N/A",
+                     "unit": "€/t CO2", "description": "Carbon cost applied to all nodes",
+                     "source": "CarbonCost.csv"})
+    except Exception as e:
+        rows.append({"parameter": "carbon_price", "value": str(e), "unit": "€/t CO2",
+                     "description": "Error loading", "source": "CarbonCost.csv"})
+
+    # ── Network JSONs ─────────────────────────────────────
+    for net_name in ["CO2_Pipeline", "CO2Ship"]:
+        net_path = period_dir / "network_data" / f"{net_name}.json"
+        try:
+            with open(net_path) as fh:
+                net = json.load(fh)
+            eco = net.get("Economics", {})
+            perf = net.get("Performance", {})
+            prefix = net_name
+            rows.append({"parameter": f"{prefix}.loss", "value": perf.get("loss", "N/A"),
+                         "unit": "fraction/km", "description": "Transport loss per km",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.capex_gamma1", "value": eco.get("gamma1", "N/A"),
+                         "unit": "€", "description": "CAPEX fixed term",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.capex_gamma2", "value": eco.get("gamma2", "N/A"),
+                         "unit": "€/(t/h) or €/(t/h/km)", "description": "CAPEX capacity or distance-based term",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.OPEX_variable", "value": eco.get("OPEX_variable", "N/A"),
+                         "unit": "€/t", "description": "Variable OPEX per tonne transported",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.OPEX_fixed", "value": eco.get("OPEX_fixed", "N/A"),
+                         "unit": "% of CAPEX", "description": "Fixed OPEX as fraction of CAPEX",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.discount_rate", "value": eco.get("discount_rate", "N/A"),
+                         "unit": "-", "description": "Discount rate for annualization",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.lifetime", "value": eco.get("lifetime", "N/A"),
+                         "unit": "years", "description": "Asset lifetime",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.loss2emissions", "value": perf.get("loss2emissions", "N/A"),
+                         "unit": "-", "description": "Whether transport loss counts as CO2 emission",
+                         "source": f"{net_name}.json"})
+        except Exception as e:
+            rows.append({"parameter": f"{net_name}", "value": str(e), "unit": "",
+                         "description": "Error loading", "source": f"{net_name}.json"})
+
+    return pd.DataFrame(rows)[["parameter", "value", "unit", "description", "source"]]
+
+parameters_df = _build_parameters_df(h5_file)
+
+# ══════════════════════════════════════════════════════════
+# CO2_CAPTURE SHEET
+# ══════════════════════════════════════════════════════════
+def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
+                           summary_raw: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build overall and per-storage CO2 capture cost summary."""
+    # Identify storage nodes from design data
+    stor_node_names = set(
+        nodes_wide_df.loc[
+            nodes_wide_df["technology"].astype(str).str.contains("storage", case=False, na=False),
+            "node",
+        ]
+    )
+
+    # Sum CO2 network_inflow per node from energy balance
+    co2_inflow_per_node: dict[str, float] = {}
+    with h5py.File(h5_path, "r") as fh:
+        raw_eb = extract_datasets_from_h5group(fh["operation"]["energy_balance"])
+
+    for k, v in raw_eb.items():
+        if not (isinstance(k, tuple) and len(k) == 4):
+            continue
+        _, node, carrier, var = k
+        if carrier == "CO2captured" and var == "network_inflow":
+            arr_val = float(np.array(v).sum())
+            if arr_val > 0:
+                co2_inflow_per_node[node] = co2_inflow_per_node.get(node, 0.0) + arr_val
+
+    # Restrict to storage nodes only
+    stor_co2_inflow = {n: v for n, v in co2_inflow_per_node.items() if n in stor_node_names}
+    total_co2_injected = sum(stor_co2_inflow.values())
+
+    # Pull design costs for each storage node (summed across technologies)
+    stor_design = (
+        nodes_wide_df[nodes_wide_df["node"].isin(stor_node_names)]
+        .groupby("node", as_index=False)
+        .agg(
+            capex_tot=("capex_tot", "sum"),
+            opex_fixed_tot=("opex_fixed_tot", "sum"),
+            opex_variable=("opex_variable", "sum"),
+            injection_capacity=("size", "sum"),
+        )
+    )
+
+    # Summary entry: total model cost from summary
+    def _get_summary_val(key):
+        for k in summary_raw:
+            if isinstance(k, tuple) and k[0] == key:
+                v = summary_raw[k]
+                if isinstance(v, (list, np.ndarray)):
+                    v = v[0] if len(v) > 0 else None
+                return float(v) if not isinstance(v, (bytes, str)) else decode(v)
+        return None
+
+    total_cost = _get_summary_val("total_cost")
+    emissions_net = _get_summary_val("emissions_net")
+    carbon_cost = _get_summary_val("carbon_cost")
+
+    avg_cost_overall = (total_cost / total_co2_injected) if total_co2_injected > 0 else None
+
+    overall_rows = [
+        {"metric": "total_cost",           "value": total_cost,           "unit": "€",      "note": "Total system cost (CAPEX+OPEX+imports+carbon)"},
+        {"metric": "carbon_cost",          "value": carbon_cost,          "unit": "€",      "note": "Carbon cost component"},
+        {"metric": "emissions_net",        "value": emissions_net,        "unit": "t CO2",  "note": "Net system emissions"},
+        {"metric": "total_CO2_injected",   "value": total_co2_injected,   "unit": "t CO2",  "note": "Sum of CO2 injected at all storage nodes"},
+        {"metric": "avg_capture_cost",     "value": avg_cost_overall,     "unit": "€/t CO2","note": "total_cost / total_CO2_injected"},
+    ]
+    overall_df = pd.DataFrame(overall_rows)
+
+    # Per-storage breakdown
+    per_stor_rows = []
+    for node in sorted(stor_co2_inflow.keys()):
+        co2_t = stor_co2_inflow[node]
+        design_row = stor_design[stor_design["node"] == node]
+        capex_t = float(design_row["capex_tot"].values[0]) if not design_row.empty else 0.0
+        opex_f  = float(design_row["opex_fixed_tot"].values[0]) if not design_row.empty else 0.0
+        opex_v  = float(design_row["opex_variable"].values[0]) if not design_row.empty else 0.0
+        inj_cap = float(design_row["injection_capacity"].values[0]) if not design_row.empty else 0.0
+        direct_cost = capex_t + opex_f + opex_v
+        cost_per_t = direct_cost / co2_t if co2_t > 0 else None
+        per_stor_rows.append({
+            "node": node,
+            "CO2_injected_t": co2_t,
+            "injection_capacity_tph": inj_cap,
+            "capex_tot_EUR": capex_t,
+            "opex_fixed_EUR": opex_f,
+            "opex_variable_EUR": opex_v,
+            "direct_cost_EUR": direct_cost,
+            "direct_cost_per_tCO2": cost_per_t,
+        })
+
+    per_stor_df = pd.DataFrame(per_stor_rows).sort_values("CO2_injected_t", ascending=False).reset_index(drop=True)
+    per_stor_df.index += 1
+
+    return overall_df, per_stor_df
+
+co2_capture_overall_df, co2_capture_per_stor_df = _build_co2_capture_df(
+    h5_file, nodes_wide, raw_summary
+)
 
 # ══════════════════════════════════════════════════════════
 # PRINT SANITY CHECK TABLES
@@ -404,25 +637,28 @@ with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="k_means_specs")
         print(f"  ✅ k_means_specs: {df.shape}")
 
-    # active_arcs
-    active_arcs_out.to_excel(writer, sheet_name="active_arcs")
-    print(f"  ✅ active_arcs:   {active_arcs_out.shape}")
+    # Parameters
+    parameters_df.to_excel(writer, sheet_name="Parameters", index=False)
+    print(f"  ✅ Parameters:    {parameters_df.shape}")
 
-    # inactive_arcs
-    inactive_arcs_out.to_excel(writer, sheet_name="inactive_arcs")
-    print(f"  ✅ inactive_arcs: {inactive_arcs_out.shape}")
+    # Node (combined active + inactive)
+    nodes_combined_out.to_excel(writer, sheet_name="Node")
+    print(f"  ✅ Node:          {nodes_combined_out.shape}")
 
-    # active_nodes
-    active_nodes_out.to_excel(writer, sheet_name="active_nodes")
-    print(f"  ✅ active_nodes:  {active_nodes_out.shape}")
-
-    # inactive_nodes
-    inactive_nodes_out.to_excel(writer, sheet_name="inactive_nodes")
-    print(f"  ✅ inactive_nodes:{inactive_nodes_out.shape}")
+    # Arc (combined active + inactive)
+    arcs_combined_out.to_excel(writer, sheet_name="Arc")
+    print(f"  ✅ Arc:           {arcs_combined_out.shape}")
 
     # active component connectivity sanity
     components_out.to_excel(writer, sheet_name="active_components_sanity")
     print(f"  ✅ active_components_sanity: {components_out.shape}")
+
+    # CO2_capture — overall summary + per-storage breakdown
+    co2_capture_overall_df.to_excel(writer, sheet_name="CO2_capture", index=False, startrow=0)
+    # Write per-storage table below with a blank row gap
+    gap_row = len(co2_capture_overall_df) + 3
+    co2_capture_per_stor_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
+    print(f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, per_storage={co2_capture_per_stor_df.shape}")
 
 print(f"\n✅ Excel saved → {output_excel}")
 
@@ -479,6 +715,7 @@ if pd.isna(max_size_all) or max_size_all <= 0:
 
 missing  = []
 arc_js_meta = []
+arrow_js_meta = []
 
 all_arcs_map = networks_wide.copy()
 all_arcs_map["status"] = np.where(all_arcs_map["size"] > 0.01, "Active", "Inactive")
@@ -531,6 +768,20 @@ for _, row in all_arcs_map.iterrows():
     )
     line.add_to(layers[layer_key])
     arc_js_meta.append({"id": line.get_name(), "baseWeight": base_weight})
+
+    if is_active:
+        line_color = network_colors.get(row["mode"], "gray")
+        arrow = PolyLineTextPath(
+            line,
+            "    \u25ba    ",
+            repeat=True,
+            offset=0,
+            weight=3,
+            color=line_color,
+            attributes={"fill": line_color, "font-weight": "bold", "font-size": "14"},
+        )
+        arrow.add_to(layers[layer_key])
+        arrow_js_meta.append({"id": arrow.get_name(), "text": "    \u25ba    "})
 
 if missing:
     print(f"\n⚠️  Missing coordinates for {len(missing)} arc(s) — not in NodeLocations.csv:")
@@ -650,6 +901,11 @@ control_html = """
         <option value="emission" selected>Based on emission</option>
         <option value="equal">Equal size</option>
     </select>
+    <hr style="margin:8px 0">
+    <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+        <input type="checkbox" id="showArrows" checked>
+        Show direction arrows
+    </label>
 </div>
 """
 
@@ -659,6 +915,7 @@ m.get_root().html.add_child(folium.Element(control_html))
 map_var = m.get_name()
 arc_js = json.dumps(arc_js_meta)
 node_js = json.dumps(node_js_meta)
+arrow_js = json.dumps(arrow_js_meta)
 
 m_script = f"""
 <script>
@@ -666,6 +923,7 @@ m_script = f"""
     var mapObj = {map_var};
     var arcMeta = {arc_js};
     var nodeMeta = {node_js};
+    var arrowMeta = {arrow_js};
 
     function applyArcScale() {{
         var scale = parseFloat(document.getElementById('arcScaleSlider').value || '1');
@@ -690,17 +948,29 @@ m_script = f"""
         }});
     }}
 
+    function applyArrowToggle() {{
+        var show = document.getElementById('showArrows').checked;
+        arrowMeta.forEach(function(item) {{
+            var layer = window[item.id];
+            if (!layer || !layer.setText) return;
+            layer.setText(show ? item.text : null);
+        }});
+    }}
+
     function initControls() {{
         var arcSlider = document.getElementById('arcScaleSlider');
         var nodeSlider = document.getElementById('nodeScaleSlider');
         var nodeMode = document.getElementById('nodeSizeMode');
+        var arrowToggle = document.getElementById('showArrows');
         if (!arcSlider || !nodeSlider || !nodeMode) return;
         arcSlider.addEventListener('input', applyArcScale);
         nodeSlider.addEventListener('input', applyNodeScale);
         nodeMode.addEventListener('change', applyNodeScale);
+        if (arrowToggle) arrowToggle.addEventListener('change', applyArrowToggle);
         // Always update values on load
         applyArcScale();
         applyNodeScale();
+        applyArrowToggle();
         // Also update value displays immediately
         document.getElementById('arcScaleValue').textContent = arcSlider.value + 'x';
         document.getElementById('nodeScaleValue').textContent = nodeSlider.value + 'x';
