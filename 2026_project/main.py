@@ -365,12 +365,18 @@ if prepare_inputs:
             # Assuming the storage can be fully charged or discharged within 25 years in tonne per hour (T/h)
             injection_rate = capacity / (25 * 365 * 24)  # Convert to T/h
 
+            # Cap size_max at what is physically achievable within 1 year (the model horizon: 8760 h).
+            # The geological capacity often exceeds what can be injected in 1 year, leaving a large
+            # but unreachable upper bound that causes Gurobi numerical scaling warnings.
+            # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
+            size_max = min(capacity, injection_rate * 8760)
+
             json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
         
             if json_path.exists():
                 with open(json_path, 'r') as f:
                     data = json.load(f)
-                data["size_max"] = round(capacity, 2)   # size_max = storage capacity
+                data["size_max"] = round(size_max, 2)   # size_max = max achievable storage in model horizon
                 data["Flexibility"]["injection_rate_max"] = round(injection_rate, 4)
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
