@@ -117,8 +117,8 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
 
         #########  CAPEX from Equation 8, 10, 11 in Oeuvray et al. (2024) #########
         ### 1. Intermediate storage = Capacity (t) * Cost_of_intermediate_storage (EUR/t)  (Equation 8)
-        capex_storage = o["c_st_EUR_per_t"] * o["ship_capacity_t"]
-
+        #capex_storage = o["c_st_EUR_per_t"] * o["ship_capacity_t"]
+        capex_storage = o["c_st_EUR_per_m3"] * o["ship_capacity_m3"]  # Using m3 as per Roussanaly et al. (2021)
 
         ### 2. Loading station =  Mass_flow_CO2_transport (t/year) * Cost_of_loading (EUR/t) / CRF (Equation 10)
         capex_loading = o["c_l_EUR_per_t"] * emission_tpa / crf
