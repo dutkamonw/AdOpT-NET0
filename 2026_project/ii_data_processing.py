@@ -219,7 +219,7 @@ def data_processing():
         pipeline = json.load(json_file)
     
     pipeline["capex_defined_per_arc"] = 1       # To enable capex for individual arc
-    pipeline["size_max"] = 1000                 # Set a larger max size
+    pipeline["size_max"] = 10000                # Set a larger max size
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
     pipeline["Performance"]["loss"] = 0         # Set a default loss value
 
@@ -232,9 +232,10 @@ def data_processing():
         ship = json.load(json_file)
     
     ship["capex_defined_per_arc"] = 1       # To enable capex for individual arc
+    ship["size_max"] = 10000                # Set a larger max size
     ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
     ship["Performance"]["loss"] = 0         # Set a default loss value
-
+    
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)
 
