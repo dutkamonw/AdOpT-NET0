@@ -27,8 +27,6 @@ from pathlib import Path
 import duckdb
 import sys
 
-from sklearn import pipeline
-from adopt_net0.database.utilities import convert_currency
 
 # Ensure imports resolve to the local repository package first (not site-packages).
 project_root = Path(__file__).resolve().parent.parent
@@ -220,9 +218,10 @@ def data_processing():
     with open(output_path / "CO2_Pipeline.json", "r") as json_file:
         pipeline = json.load(json_file)
     
-    pipeline["capex_defined_per_arc"] = 1   # To enable capex for individual arc
-    pipeline["size_max"] = 1000             # Set a larger max size
-    pipeline["size_max_defined_per_arc"] = 0   # To disable max size for individual arc, and use the global max size instead
+    pipeline["capex_defined_per_arc"] = 1       # To enable capex for individual arc
+    pipeline["size_max"] = 1000                 # Set a larger max size
+    pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
+    pipeline["Performance"]["loss"] = 0         # Set a default loss value
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
@@ -232,8 +231,9 @@ def data_processing():
     with open(output_path / "CO2Ship.json", "r") as json_file:
         ship = json.load(json_file)
     
-    ship["capex_defined_per_arc"] = 1   # To enable capex for individual arc
-    ship["size_max_defined_per_arc"] = 0   # To disable max size for individual arc, and use the global max size instead
+    ship["capex_defined_per_arc"] = 1       # To enable capex for individual arc
+    ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
+    ship["Performance"]["loss"] = 0         # Set a default loss value
 
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)
