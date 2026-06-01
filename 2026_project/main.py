@@ -234,6 +234,26 @@ if prepare_inputs:
     assign_technologies_to_nodes(input_path, output_path)
     print("Assigning technologies to nodes and updating emitter JSON files: Completed")
 
+    # Tighten emitter technology size_max to actual emission rate (+ 10% margin).
+    # The template value of 10000 t/h is a generic placeholder that creates an unrealistically
+    # large upper bound, causing Gurobi's matrix coefficient range to reach ~2e+12.
+    con = duckdb.connect(str(db_path))
+    try:
+        emitter_df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").df()
+    except:
+        emitter_df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'").df()
+    con.close()
+
+    for _, row in emitter_df.iterrows():
+        tec_path = path_model_input / "period1" / "node_data" / row["name"] / "technology_data" / f"emitter_{row['subsector']}.json"
+        if tec_path.exists():
+            with open(tec_path) as f:
+                tec_data = json.load(f)
+            tec_data["size_max"] = round(float(row["emission_TPH"]) * 1.1, 2)  # 10% margin above actual emission
+            with open(tec_path, "w") as f:
+                json.dump(tec_data, f, indent=4)
+    print(f"Tightened emitter size_max for {len(emitter_df)} nodes: Completed")
+
     
     ########################## 10) Assign carrier data #########################
     
@@ -361,8 +381,7 @@ if prepare_inputs:
         for _, row in storage_df.iterrows():
             if pd.notna(row['capacity_T']):
                 capacity = float(row['capacity_T'])
-            else:
-                capacity = 1_000_000.0  # Default capacity
+
 
             # Assuming the storage can be fully charged or discharged within 25 years in tonne per hour (T/h)
             injection_rate = capacity / (25 * 365 * 24)  # Convert to T/h
@@ -371,7 +390,7 @@ if prepare_inputs:
             # The geological capacity often exceeds what can be injected in 1 year, leaving a large
             # but unreachable upper bound that causes Gurobi numerical scaling warnings.
             # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
-            size_max = min(capacity, injection_rate * 8760)
+            size_max = min(capacity, injection_rate * 24) # Test 1 day
 
             json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
         
