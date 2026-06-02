@@ -49,6 +49,7 @@ marnet_geograph = GeoGraph.load_geograph("marnet")
 import json
 import re
 import shutil
+import unicodedata
 
 import networkx as nx
 from adopt_net0.database.components.networks import CO2_Pipeline_CostModel
@@ -92,8 +93,8 @@ def sanitize_name(name):
     """
     if pd.isna(name) or name is None:
         return 'Unnamed_Node'
-    
-    name_str = str(name).strip()
+
+    name_str = canonicalize_name(name)
     
     # Replace invalid chars
     sanitized = re.sub(r'[\\/:*?"<>|]', '_', name_str)
@@ -103,6 +104,42 @@ def sanitize_name(name):
     
     # Truncate long names
     return sanitized[:200] if sanitized else 'Unnamed_Node'
+
+
+def canonicalize_name(name):
+    """Canonicalize node names to avoid mojibake duplicates in matrices and topology."""
+    if pd.isna(name) or name is None:
+        return ""
+
+    s = name.decode("utf-8", errors="replace") if isinstance(name, bytes) else str(name)
+    s = unicodedata.normalize("NFC", s).replace("\u00a0", " ").strip()
+
+    # Remove trailing punctuation artifacts frequently present in source datasets.
+    s = s.rstrip(". ")
+
+    # Common mojibake fixes seen in this project.
+    explicit_fixes = {
+        "BatÄ±Ã§im Bornova Cement Plant": "Batıçim Bornova Cement Plant",
+        "Ä°DÃ‡ Izdemir Aliaga steel plant": "İDÇ Izdemir Aliaga steel plant",
+        "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÃ‡ DELS HORTS)": "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÇ DELS HORTS)",
+        "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi": "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
+        "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi": "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
+        "EVERÃ‰ SAS": "ÉVERÉ SAS",
+    }
+    if s in explicit_fixes:
+        return explicit_fixes[s]
+
+    # Heuristic repair for latin1-decoded UTF-8 text.
+    if any(token in s for token in ("Ã", "Ä", "Å", "Â", "â")):
+        try:
+            repaired = s.encode("latin-1").decode("utf-8")
+            repaired = unicodedata.normalize("NFC", repaired).replace("\u00a0", " ").strip().rstrip(". ")
+            if repaired:
+                return repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+
+    return s
 
 
 ############ 1. ETL pipeline for loading all cleaned data into duckdb database (EEA, Climate TRACE, CO2 storage, port) ################
@@ -977,7 +1014,13 @@ def create_matrix(table_name, col_start, col_end, value, output_path):
     # if 'selection' column exists, filter to keep only rows where selection == 'Yes'
     if 'selection' in data.columns:
         data = data[data['selection'].astype(str).str.strip() == 'Yes'].copy()
+
+    # Canonicalize node names before creating matrix to prevent duplicate mojibake variants.
+    data['node_start'] = data['node_start'].apply(canonicalize_name)
+    data['node_end'] = data['node_end'].apply(canonicalize_name)
+
     data = data.dropna(subset=['node_start', 'node_end'])
+    data = data[(data['node_start'] != '') & (data['node_end'] != '')].copy()
     data['cell_value'] = pd.to_numeric(data['cell_value'], errors='coerce')
     
     ### Calculate missing distances using coordinates if available

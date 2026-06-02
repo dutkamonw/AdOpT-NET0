@@ -411,7 +411,7 @@ if prepare_inputs:
     with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as f:
         node_names = json.load(f)["nodes"]
 
-    carbon_price = 200  # Assume higher than Xiao's €150/tonne CO2
+    carbon_price = 200  # Assume
     success = 0
 
     for node in node_names:

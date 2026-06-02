@@ -33,7 +33,14 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from user_defined_function import create_gamma_matrix, create_matrix, copy_technology_from_db, copy_network_data_from_db, create_emitter_technology
+from user_defined_function import (
+    canonicalize_name,
+    create_gamma_matrix,
+    create_matrix,
+    copy_technology_from_db,
+    copy_network_data_from_db,
+    create_emitter_technology,
+)
 
 
 ##################################################################################################
@@ -141,7 +148,7 @@ def data_processing():
     con.close()
 
     # Extract names from tuples to a list of node names
-    node_name_list = [name[0] for name in node_name]
+    node_name_list = sorted({canonicalize_name(name[0]) for name in node_name if name and name[0] is not None})
 
     # List of carriers to be included in the model (must match with the carriers defined in the model)
     carrier_list = ["electricity", "heat", "CO2captured"]
@@ -158,7 +165,7 @@ def data_processing():
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
     topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-01-07 23:00"   # 1 week
+    topology["end_date"] = "2041-01-01 23:00"   # Test 1 day
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:

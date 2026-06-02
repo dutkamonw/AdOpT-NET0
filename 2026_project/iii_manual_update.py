@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import duckdb
 from pathlib import Path
-from user_defined_function import create_matrix, create_gamma_matrix
+from user_defined_function import canonicalize_name, create_matrix, create_gamma_matrix
 
 ##################################################################################################
 
@@ -45,14 +45,31 @@ def manual_update():
     df_combined_selected = pd.read_excel(updated_nodes)
     df_pipeline_selected = pd.read_excel( updated_pipeline_network)
     # 'Yes' if from_name or to_name matches selected name_sanitized from combined_selected file.
-    selected_names = set(df_combined_selected.loc[df_combined_selected["selection"].fillna("") == "Yes","name_sanitized",].dropna().astype(str))
+    selected_names = {
+        canonicalize_name(n)
+        for n in df_combined_selected.loc[
+            df_combined_selected["selection"].fillna("") == "Yes", "name_sanitized"
+        ].dropna().astype(str)
+    }
     df_pipeline_selected["selected_emitter"] = df_pipeline_selected.apply(
         lambda row: "Yes"
-        if str(row.get("from_name", "")).strip() in selected_names
-        or str(row.get("to_name", "")).strip() in selected_names
+        if canonicalize_name(row.get("from_name", "")) in selected_names
+        or canonicalize_name(row.get("to_name", "")) in selected_names
         else "No",
         axis=1,
     )
+
+    # Canonicalize names in edited files before writing to DB/matrices.
+    for col in ["name_sanitized", "from_name", "to_name", "from_port", "to_port"]:
+        if col in df_combined_selected.columns:
+            df_combined_selected[col] = df_combined_selected[col].apply(canonicalize_name)
+        if col in df_pipeline_selected.columns:
+            df_pipeline_selected[col] = df_pipeline_selected[col].apply(canonicalize_name)
+
+    df_ship_routes = pd.read_excel(updated_ship_routes)
+    for col in ["from_port", "to_port"]:
+        if col in df_ship_routes.columns:
+            df_ship_routes[col] = df_ship_routes[col].apply(canonicalize_name)
 
     ###  Helper function to fill missing values (if any) in 'distance_km' column with user_defined_function.distance
     from user_defined_function import distance
@@ -66,19 +83,20 @@ def manual_update():
 
 
     ###  Overwrite the same input file with the new column.
+    df_combined_selected.to_excel(updated_nodes, index=False)
     df_pipeline_selected.to_excel(updated_pipeline_network, index=False)
+    df_ship_routes.to_excel(updated_ship_routes, index=False)
 
     ### To store the updated excel files into database.duckdb for later use (before filtering)
     # Load Excel files from following dictionary to database.duckdb
     update_network = {
-        "combined_selected_final": updated_nodes,
-        "pipeline_network_final": updated_pipeline_network,
-        "ship_routes_final": updated_ship_routes,
+        "combined_selected_final": df_combined_selected,
+        "pipeline_network_final": df_pipeline_selected,
+        "ship_routes_final": df_ship_routes,
     }
 
     con = duckdb.connect(str(db_path))
-    for table_name, file_path in update_network.items():
-        df = pd.read_excel(file_path)
+    for table_name, df in update_network.items():
         con.register("df_input", df)
         con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df_input")
     con.close()
@@ -176,7 +194,7 @@ def manual_update():
     con.close()
 
     # Extract names from tuples to a list of node names
-    node_name_list = [name[0] for name in node_name]
+    node_name_list = sorted({canonicalize_name(name[0]) for name in node_name if name and name[0] is not None})
 
     # List of carriers to be included in the model (must match with the carriers defined in the model)
     carrier_list = ["electricity", "heat", "CO2captured"]
