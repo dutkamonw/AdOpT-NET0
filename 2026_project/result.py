@@ -46,7 +46,7 @@ try:
 except Exception as e:
     print(f"[WARN] Could not load iso2 map from database: {e}")
 
-h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260527141038-1\optimization_results.h5")
+h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260603103317-1_1D_SL10K-FIX_MG1\optimization_results.h5")
 node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
 output_excel  = h5_file.parent / "results.xlsx"
 output_map    = h5_file.parent / "network_map.html"
@@ -412,10 +412,40 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
         _cfg("solveroptions", "solver", description="Solver")
         _cfg("solveroptions", "mipgap", description="MIP gap tolerance")
         _cfg("solveroptions", "timelim", "h", "Solver time limit")
+        _cfg("solveroptions", "mipfocus", description="MIP focus")
+        _cfg("solveroptions", "numericfocus", description="Numeric focus")
         _cfg("energybalance", "copperplate", description="Copper-plate energy balance (1=yes)")
         _cfg("economic", "global_discountrate", description="Global discount rate (-1 = per-technology)")
     except Exception as e:
         rows.append({"parameter": "ConfigModel", "value": str(e), "unit": "", "description": "Error loading", "source": "ConfigModel.json"})
+
+    # ── Topology.json ─────────────────────────────────────
+    topology_path = base / "3_model_inputs" / "Topology.json"
+    try:
+        with open(topology_path) as fh:
+            topology = json.load(fh)
+        rows.append({
+            "parameter": "topology.start_date",
+            "value": topology.get("start_date", "N/A"),
+            "unit": "",
+            "description": "Model start datetime from Topology.json",
+            "source": "Topology.json",
+        })
+        rows.append({
+            "parameter": "topology.end_date",
+            "value": topology.get("end_date", "N/A"),
+            "unit": "",
+            "description": "Model end datetime from Topology.json",
+            "source": "Topology.json",
+        })
+    except Exception as e:
+        rows.append({
+            "parameter": "Topology",
+            "value": str(e),
+            "unit": "",
+            "description": "Error loading",
+            "source": "Topology.json",
+        })
 
     # ── Carbon cost ───────────────────────────────────────
     try:
@@ -446,6 +476,9 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
             prefix = net_name
             rows.append({"parameter": f"{prefix}.loss", "value": perf.get("loss", "N/A"),
                          "unit": "fraction/km", "description": "Transport loss per km",
+                         "source": f"{net_name}.json"})
+            rows.append({"parameter": f"{prefix}.size_max", "value": net.get("size_max", "N/A"),
+                         "unit": "t/h", "description": "Maximum network arc size",
                          "source": f"{net_name}.json"})
             rows.append({"parameter": f"{prefix}.capex_gamma1", "value": eco.get("gamma1", "N/A"),
                          "unit": "€", "description": "CAPEX fixed term",
