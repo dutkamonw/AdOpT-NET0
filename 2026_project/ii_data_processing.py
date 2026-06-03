@@ -165,7 +165,7 @@ def data_processing():
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
     topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-01-01 23:00"   # Test 1 day
+    topology["end_date"] = "2041-01-07 23:00"   # Test 1 week
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
@@ -226,9 +226,9 @@ def data_processing():
         pipeline = json.load(json_file)
     
     pipeline["capex_defined_per_arc"] = 1       # To enable capex for individual arc
-    pipeline["size_max"] = 5000                 # Test
+    pipeline["size_max"] = 10000                # Test
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    pipeline["Performance"]["loss"] = 0         # Set a default loss value
+    #pipeline["Performance"]["loss"] = 0         # Set a default loss value
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
@@ -239,9 +239,9 @@ def data_processing():
         ship = json.load(json_file)
     
     ship["capex_defined_per_arc"] = 1       # To enable capex for individual arc
-    ship["size_max"] = 5000                 # Test
+    ship["size_max"] = 10000                # Test
     ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    ship["Performance"]["loss"] = 0         # Set a default loss value
+    #ship["Performance"]["loss"] = 0         # Set a default loss value
     
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)

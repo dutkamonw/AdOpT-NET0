@@ -178,7 +178,7 @@ if prepare_inputs:
     configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
 
     # Set value to define MIP gap for the optimization solver
-    configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
+    configuration["solveroptions"]["mipgap"]["value"] = 0.01  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
 
     configuration["solveroptions"]["numericfocus"]["value"] = 3 # 0 (default) to 3 (most aggressive) for better numerical stability, especially important for large-scale problems with wide-ranging cost coefficients
 
@@ -390,7 +390,7 @@ if prepare_inputs:
             # The geological capacity often exceeds what can be injected in 1 year, leaving a large
             # but unreachable upper bound that causes Gurobi numerical scaling warnings.
             # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
-            size_max = min(capacity, injection_rate * 24) # Test 1 day
+            size_max = min(capacity, injection_rate * 168) # Test 1 week
 
             json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
         
