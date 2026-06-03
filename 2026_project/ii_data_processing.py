@@ -228,7 +228,7 @@ def data_processing():
     pipeline["capex_defined_per_arc"] = 1       # To enable capex for individual arc
     pipeline["size_max"] = 10000                # Test
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    #pipeline["Performance"]["loss"] = 0         # Set a default loss value
+    pipeline["Performance"]["loss"] = 0         # Set a default loss value
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
@@ -241,7 +241,10 @@ def data_processing():
     ship["capex_defined_per_arc"] = 1       # To enable capex for individual arc
     ship["size_max"] = 10000                # Test
     ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    #ship["Performance"]["loss"] = 0         # Set a default loss value
+    ship["Performance"]["loss"] = 0         # Set a default loss value
+    ship["Performance"]["energyconsumption"]["electricity"]["cons_model"] = 1
+    ship["Performance"]["energyconsumption"]["electricity"]["k_flow"] = 0.009
+    ship["Performance"]["energyconsumption"]["electricity"]["k_flowDistance"] = 0
     
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)
