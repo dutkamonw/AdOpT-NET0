@@ -229,6 +229,8 @@ def data_processing():
     pipeline["size_max"] = 10000                # Test
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
     pipeline["Performance"]["loss"] = 0         # Set a default loss value
+    pipeline["Performance"]["bidirectional_network"] = 1   # To allow flow in both directions
+    pipeline["Performance"]["bidirectional_netowork_precise"] = 1   # Not allow flow in both directions at the same time
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
