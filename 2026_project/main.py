@@ -70,7 +70,7 @@ manual_update_network = True  # Optional step (if there is a manual update on no
 building_node_folder = True # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = False # Step 13) run the optimization model
+run_model = True # Step 13) run the optimization model
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -175,12 +175,14 @@ if prepare_inputs:
         configuration = json.load(json_file)
 
     # Set optimization objective (select from existing options in ConfigModel.json)
-    configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+    #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+    configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
+    configuration["optimization"]["emission_limit"]["value"] = 33499354          # reduction 50% from total emission from all emitters in 1 year
 
     # Set value to define MIP gap for the optimization solver
-    configuration["solveroptions"]["mipgap"]["value"] = 0.01  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
+    configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
 
-    configuration["solveroptions"]["numericfocus"]["value"] = 3 # 0 (default) to 3 (most aggressive) for better numerical stability, especially important for large-scale problems with wide-ranging cost coefficients
+    configuration["solveroptions"]["numericfocus"]["value"] = 0 # 0 (default) to 3 (most aggressive) for better numerical stability, especially important for large-scale problems with wide-ranging cost coefficients
 
     # Set result path
     configuration['reporting']['save_summary_path']['value'] = str(result_path)
@@ -390,7 +392,7 @@ if prepare_inputs:
             # The geological capacity often exceeds what can be injected in 1 year, leaving a large
             # but unreachable upper bound that causes Gurobi numerical scaling warnings.
             # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
-            size_max = min(capacity, injection_rate * 168) # Test 1 week
+            size_max = min(capacity, injection_rate * 365 * 24) # Test 1 year
 
             json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
         

@@ -9,6 +9,7 @@ import json
 import networkx as nx
 import sys
 from pathlib import Path
+from datetime import datetime
 import duckdb
 from adopt_net0.result_management.read_results import extract_datasets_from_h5group
 
@@ -46,7 +47,8 @@ try:
 except Exception as e:
     print(f"[WARN] Could not load iso2 map from database: {e}")
 
-h5_file       = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260603103317-1_1D_SL10K-FIX_MG1\optimization_results.h5")
+# Set the exact run file here (single-run mode).
+h5_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260604022706-1\optimization_results.h5")
 node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
 output_excel  = h5_file.parent / "results.xlsx"
 output_map    = h5_file.parent / "network_map.html"
@@ -513,6 +515,7 @@ parameters_df = _build_parameters_df(h5_file)
 # CO2_CAPTURE SHEET
 # ══════════════════════════════════════════════════════════
 def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
+                           networks_wide_df: pd.DataFrame,
                            summary_raw: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build overall and per-storage CO2 capture cost summary."""
     # Identify storage nodes from design data
@@ -541,6 +544,42 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     stor_co2_inflow = {n: v for n, v in co2_inflow_per_node.items() if n in stor_node_names}
     total_co2_injected = sum(stor_co2_inflow.values())
 
+    # Annualize CO2 denominator to match annualized costs in summary.
+    # For weekly models (e.g., 168 x 1h), this avoids inflating €/t by ~52x.
+    base = h5_path.parent.parent.parent
+    topology_path = base / "3_model_inputs" / "Topology.json"
+    hours_per_timestep = 1.0
+    try:
+        with open(topology_path) as fh:
+            topology = json.load(fh)
+        resolution = str(topology.get("resolution", "1h")).strip().lower()
+        if resolution.endswith("h"):
+            hours_per_timestep = float(resolution[:-1])
+    except Exception:
+        hours_per_timestep = 1.0
+
+    modelled_timesteps = 0
+    if stor_co2_inflow:
+        for k, v in raw_eb.items():
+            if not (isinstance(k, tuple) and len(k) == 4):
+                continue
+            _, node, carrier, var = k
+            if node in stor_node_names and carrier == "CO2captured" and var == "network_inflow":
+                modelled_timesteps = int(np.array(v).size)
+                if modelled_timesteps > 0:
+                    break
+    if modelled_timesteps <= 0:
+        # Fallback: infer from any energy-balance series.
+        for v in raw_eb.values():
+            arr_size = int(np.array(v).size)
+            if arr_size > 0:
+                modelled_timesteps = arr_size
+                break
+
+    modelled_hours = modelled_timesteps * hours_per_timestep if modelled_timesteps > 0 else 0.0
+    annualization_factor = (8760.0 / modelled_hours) if modelled_hours > 0 else 1.0
+    total_co2_injected_annualized = total_co2_injected * annualization_factor
+
     # Pull design costs for each storage node (summed across technologies)
     stor_design = (
         nodes_wide_df[nodes_wide_df["node"].isin(stor_node_names)]
@@ -566,15 +605,141 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     total_cost = _get_summary_val("total_cost")
     emissions_net = _get_summary_val("emissions_net")
     carbon_cost = _get_summary_val("carbon_cost")
+    cost_capex_tecs = _get_summary_val("cost_capex_tecs")
+    cost_capex_netws = _get_summary_val("cost_capex_netws")
 
-    avg_cost_overall = (total_cost / total_co2_injected) if total_co2_injected > 0 else None
+    # CAPEX annualization traceability / up-front reconstruction
+    # annualized_cost = upfront_cost * annualization_factor
+    # => implied_upfront = annualized_cost / annualization_factor
+    def _annualize_factor(discount_rate: float, lifetime_years: float, year_fraction: float) -> float:
+        if lifetime_years <= 0:
+            return np.nan
+        if abs(discount_rate) < 1e-12:
+            return (1.0 / lifetime_years) * year_fraction
+        return (discount_rate / (1 - (1 / (1 + discount_rate) ** lifetime_years))) * year_fraction
+
+    global_discount_rate = -1.0
+    config_path = base / "3_model_inputs" / "ConfigModel.json"
+    try:
+        with open(config_path) as fh:
+            cfg = json.load(fh)
+        global_discount_rate = float(cfg.get("economic", {}).get("global_discountrate", {}).get("value", -1))
+    except Exception:
+        global_discount_rate = -1.0
+
+    year_fraction = modelled_hours / 8760.0 if modelled_hours > 0 else 1.0
+
+    implied_upfront_netws = 0.0
+    implied_upfront_tecs = 0.0
+    implied_upfront_ccs = 0.0
+    netw_af_rows = []
+    tec_with_af = 0
+    tec_without_af = 0
+
+    # Networks: reconstruct from mode-specific lifetime/discount_rate.
+    try:
+        mode_cfg = {}
+        for mode in ["CO2_Pipeline", "CO2Ship"]:
+            p = base / "3_model_inputs" / "period1" / "network_data" / f"{mode}.json"
+            if p.exists():
+                with open(p) as fh:
+                    jd = json.load(fh)
+                eco = jd.get("Economics", {})
+                dr_mode = float(eco.get("discount_rate", 0.1))
+                lt_mode = float(eco.get("lifetime", 25))
+                if global_discount_rate >= 0:
+                    dr_mode = global_discount_rate
+                af_mode = _annualize_factor(dr_mode, lt_mode, year_fraction)
+                mode_cfg[mode] = {"discount_rate": dr_mode, "lifetime": lt_mode, "af": af_mode}
+
+        for mode, mdf in networks_wide_df.groupby("mode"):
+            if mode not in mode_cfg:
+                continue
+            capex_mode = float(pd.to_numeric(mdf["capex"], errors="coerce").fillna(0).sum())
+            af_mode = mode_cfg[mode]["af"]
+            if np.isfinite(af_mode) and af_mode > 0:
+                implied_upfront_netws += capex_mode / af_mode
+                netw_af_rows.append(
+                    f"{mode}: AF={af_mode:.6f} (r={mode_cfg[mode]['discount_rate']:.4f}, n={mode_cfg[mode]['lifetime']:.0f}y), annualized CAPEX={capex_mode:,.0f}€"
+                )
+    except Exception:
+        pass
+
+    # Technologies: reconstruct from per-node technology JSON economics.
+    # CCS CAPEX is reconstructed using MEA JSON in same node folder when present.
+    node_data_root = base / "3_model_inputs" / "period1" / "node_data"
+    for _, row in nodes_wide_df.iterrows():
+        node = str(row.get("node", "")).strip()
+        tec = str(row.get("technology", "")).strip()
+        capex_tec_val = float(pd.to_numeric(pd.Series([row.get("capex_tec", 0.0)]), errors="coerce").fillna(0).iloc[0])
+        capex_ccs_val = float(pd.to_numeric(pd.Series([row.get("capex_ccs", 0.0)]), errors="coerce").fillna(0).iloc[0])
+
+        if capex_tec_val > 0 and node and tec:
+            tec_json = node_data_root / node / "technology_data" / f"{tec}.json"
+            if tec_json.exists():
+                try:
+                    with open(tec_json) as fh:
+                        tjs = json.load(fh)
+                    eco = tjs.get("Economics", {})
+                    dr = float(eco.get("discount_rate", 0.1))
+                    n = float(eco.get("lifetime", 25))
+                    if global_discount_rate >= 0:
+                        dr = global_discount_rate
+                    af = _annualize_factor(dr, n, year_fraction)
+                    if np.isfinite(af) and af > 0:
+                        implied_upfront_tecs += capex_tec_val / af
+                        tec_with_af += 1
+                    else:
+                        tec_without_af += 1
+                except Exception:
+                    tec_without_af += 1
+            else:
+                tec_without_af += 1
+
+        if capex_ccs_val > 0 and node:
+            try:
+                td = node_data_root / node / "technology_data"
+                ccs_files = sorted(list(td.glob("MEA*.json")) + list(td.glob("*CCS*.json")))
+                if ccs_files:
+                    with open(ccs_files[0]) as fh:
+                        cjs = json.load(fh)
+                    eco = cjs.get("Economics", {})
+                    dr = float(eco.get("discount_rate", 0.1))
+                    n = float(eco.get("lifetime", 25))
+                    if global_discount_rate >= 0:
+                        dr = global_discount_rate
+                    af = _annualize_factor(dr, n, year_fraction)
+                    if np.isfinite(af) and af > 0:
+                        implied_upfront_ccs += capex_ccs_val / af
+            except Exception:
+                pass
+
+    implied_upfront_capex_total = implied_upfront_netws + implied_upfront_tecs + implied_upfront_ccs
+    annualized_capex_total = (cost_capex_tecs or 0.0) + (cost_capex_netws or 0.0)
+    implied_effective_af = (annualized_capex_total / implied_upfront_capex_total) if implied_upfront_capex_total > 0 else None
+    netw_af_trace = " | ".join(netw_af_rows) if netw_af_rows else "No network AF trace available"
+
+    avg_cost_overall = (total_cost / total_co2_injected_annualized) if total_co2_injected_annualized > 0 else None
 
     overall_rows = [
         {"metric": "total_cost",           "value": total_cost,           "unit": "€",      "note": "Total system cost (CAPEX+OPEX+imports+carbon)"},
+        {"metric": "cost_capex_tecs",      "value": cost_capex_tecs,      "unit": "€",      "note": "Annualized CAPEX of technologies from summary"},
+        {"metric": "cost_capex_netws",     "value": cost_capex_netws,     "unit": "€",      "note": "Annualized CAPEX of networks from summary"},
         {"metric": "carbon_cost",          "value": carbon_cost,          "unit": "€",      "note": "Carbon cost component"},
         {"metric": "emissions_net",        "value": emissions_net,        "unit": "t CO2",  "note": "Net system emissions"},
-        {"metric": "total_CO2_injected",   "value": total_co2_injected,   "unit": "t CO2",  "note": "Sum of CO2 injected at all storage nodes"},
-        {"metric": "avg_capture_cost",     "value": avg_cost_overall,     "unit": "€/t CO2","note": "total_cost / total_CO2_injected"},
+        {"metric": "modelled_timesteps",             "value": modelled_timesteps,            "unit": "-",      "note": "Number of timesteps represented in operation results"},
+        {"metric": "hours_per_timestep",             "value": hours_per_timestep,            "unit": "h",      "note": "From Topology.json resolution (fallback=1h)"},
+        {"metric": "modelled_hours",                 "value": modelled_hours,                "unit": "h",      "note": "modelled_timesteps * hours_per_timestep"},
+        {"metric": "fraction_of_year_modelled",      "value": year_fraction,                 "unit": "-",      "note": "modelled_hours / 8760 (same concept used in model annualization)"},
+        {"metric": "annualization_factor",           "value": annualization_factor,          "unit": "-",      "note": "8760 / (modelled_timesteps * hours_per_timestep)"},
+        {"metric": "config_global_discountrate",     "value": global_discount_rate,          "unit": "-",      "note": "From ConfigModel.json; -1 means per-component discount rates"},
+        {"metric": "implied_upfront_CAPEX_total",    "value": implied_upfront_capex_total,   "unit": "€ upfront", "note": "Reconstructed from annualized CAPEX using component AF (network exact by mode; technology/CCS by node JSON when available)"},
+        {"metric": "implied_effective_capex_AF",     "value": implied_effective_af,          "unit": "-",      "note": "(cost_capex_tecs + cost_capex_netws) / implied_upfront_CAPEX_total"},
+        {"metric": "trace_capex_AF_network_modes",   "value": netw_af_trace,                 "unit": "text",   "note": "Mode-level AF trace: AF, discount rate, lifetime, annualized CAPEX"},
+        {"metric": "trace_capex_AF_technology_coverage", "value": f"nodes_with_AF={tec_with_af}, nodes_without_AF={tec_without_af}", "unit": "text", "note": "Coverage of node-level technology CAPEX reconstruction"},
+        {"metric": "total_CO2_injected_modelled",    "value": total_co2_injected,            "unit": "t CO2",  "note": "Sum of CO2 injected at all storage nodes over modelled horizon"},
+        {"metric": "total_CO2_injected_annualized",  "value": total_co2_injected_annualized, "unit": "t CO2/y","note": "Modelled CO2 injected scaled to annual basis"},
+        {"metric": "avg_capture_cost",               "value": avg_cost_overall,              "unit": "€/t CO2","note": "total_cost / total_CO2_injected_annualized"},
     ]
     overall_df = pd.DataFrame(overall_rows)
 
@@ -588,10 +753,12 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         opex_v  = float(design_row["opex_variable"].values[0]) if not design_row.empty else 0.0
         inj_cap = float(design_row["injection_capacity"].values[0]) if not design_row.empty else 0.0
         direct_cost = capex_t + opex_f + opex_v
-        cost_per_t = direct_cost / co2_t if co2_t > 0 else None
+        co2_t_annualized = co2_t * annualization_factor
+        cost_per_t = direct_cost / co2_t_annualized if co2_t_annualized > 0 else None
         per_stor_rows.append({
             "node": node,
-            "CO2_injected_t": co2_t,
+            "CO2_injected_t_modelled": co2_t,
+            "CO2_injected_t_annualized": co2_t_annualized,
             "injection_capacity_tph": inj_cap,
             "capex_tot_EUR": capex_t,
             "opex_fixed_EUR": opex_f,
@@ -600,13 +767,13 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
             "direct_cost_per_tCO2": cost_per_t,
         })
 
-    per_stor_df = pd.DataFrame(per_stor_rows).sort_values("CO2_injected_t", ascending=False).reset_index(drop=True)
+    per_stor_df = pd.DataFrame(per_stor_rows).sort_values("CO2_injected_t_annualized", ascending=False).reset_index(drop=True)
     per_stor_df.index += 1
 
     return overall_df, per_stor_df
 
 co2_capture_overall_df, co2_capture_per_stor_df = _build_co2_capture_df(
-    h5_file, nodes_wide, raw_summary
+    h5_file, nodes_wide, networks_wide, raw_summary
 )
 
 # ══════════════════════════════════════════════════════════
@@ -647,53 +814,64 @@ else:
 # ══════════════════════════════════════════════════════════
 print(f"\nWriting {output_excel} ...")
 
-with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+def _write_results_excel(target_path: Path):
+    with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
 
-    # summary
-    df = flatten_dict(raw_summary)
-    if not df.empty:
-        df["value"] = df["value"].apply(decode)
-        df.to_excel(writer, sheet_name="summary")
-        print(f"  ✅ summary:       {df.shape}")
+        # summary
+        df = flatten_dict(raw_summary)
+        if not df.empty:
+            df["value"] = df["value"].apply(decode)
+            df.to_excel(writer, sheet_name="summary")
+            print(f"  ✅ summary:       {df.shape}")
 
-    # topology
-    df = flatten_dict(raw_topology)
-    if not df.empty:
-        df["value"] = df["value"].apply(decode)
-        df.to_excel(writer, sheet_name="topology")
-        print(f"  ✅ topology:      {df.shape}")
+        # topology
+        df = flatten_dict(raw_topology)
+        if not df.empty:
+            df["value"] = df["value"].apply(decode)
+            df.to_excel(writer, sheet_name="topology")
+            print(f"  ✅ topology:      {df.shape}")
 
-    # k_means_specs
-    df = flatten_dict(raw_kmeans)
-    if not df.empty:
-        df["value"] = df["value"].apply(decode)
-        df.to_excel(writer, sheet_name="k_means_specs")
-        print(f"  ✅ k_means_specs: {df.shape}")
+        # k_means_specs
+        df = flatten_dict(raw_kmeans)
+        if not df.empty:
+            df["value"] = df["value"].apply(decode)
+            df.to_excel(writer, sheet_name="k_means_specs")
+            print(f"  ✅ k_means_specs: {df.shape}")
 
-    # Parameters
-    parameters_df.to_excel(writer, sheet_name="Parameters", index=False)
-    print(f"  ✅ Parameters:    {parameters_df.shape}")
+        # Parameters
+        parameters_df.to_excel(writer, sheet_name="Parameters", index=False)
+        print(f"  ✅ Parameters:    {parameters_df.shape}")
 
-    # Node (combined active + inactive)
-    nodes_combined_out.to_excel(writer, sheet_name="Node")
-    print(f"  ✅ Node:          {nodes_combined_out.shape}")
+        # Node (combined active + inactive)
+        nodes_combined_out.to_excel(writer, sheet_name="Node")
+        print(f"  ✅ Node:          {nodes_combined_out.shape}")
 
-    # Arc (combined active + inactive)
-    arcs_combined_out.to_excel(writer, sheet_name="Arc")
-    print(f"  ✅ Arc:           {arcs_combined_out.shape}")
+        # Arc (combined active + inactive)
+        arcs_combined_out.to_excel(writer, sheet_name="Arc")
+        print(f"  ✅ Arc:           {arcs_combined_out.shape}")
 
-    # active component connectivity sanity
-    components_out.to_excel(writer, sheet_name="active_components_sanity")
-    print(f"  ✅ active_components_sanity: {components_out.shape}")
+        # active component connectivity sanity
+        components_out.to_excel(writer, sheet_name="active_components_sanity")
+        print(f"  ✅ active_components_sanity: {components_out.shape}")
 
-    # CO2_capture — overall summary + per-storage breakdown
-    co2_capture_overall_df.to_excel(writer, sheet_name="CO2_capture", index=False, startrow=0)
-    # Write per-storage table below with a blank row gap
-    gap_row = len(co2_capture_overall_df) + 3
-    co2_capture_per_stor_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
-    print(f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, per_storage={co2_capture_per_stor_df.shape}")
+        # CO2_capture — overall summary + per-storage breakdown
+        co2_capture_overall_df.to_excel(writer, sheet_name="CO2_capture", index=False, startrow=0)
+        # Write per-storage table below with a blank row gap
+        gap_row = len(co2_capture_overall_df) + 3
+        co2_capture_per_stor_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
+        print(f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, per_storage={co2_capture_per_stor_df.shape}")
 
-print(f"\n✅ Excel saved → {output_excel}")
+
+actual_output_excel = output_excel
+try:
+    _write_results_excel(actual_output_excel)
+except PermissionError:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    actual_output_excel = output_excel.parent / f"results_{ts}.xlsx"
+    print(f"[WARN] {output_excel.name} is open/locked. Writing to {actual_output_excel.name} instead.")
+    _write_results_excel(actual_output_excel)
+
+print(f"\n✅ Excel saved → {actual_output_excel}")
 
 # ══════════════════════════════════════════════════════════
 # MAP

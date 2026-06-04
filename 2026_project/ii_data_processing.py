@@ -165,7 +165,7 @@ def data_processing():
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
     topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-01-07 23:00"   # Test 1 week
+    topology["end_date"] = "2041-12-31 23:00"   # Test 1 year
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
@@ -229,8 +229,8 @@ def data_processing():
     pipeline["size_max"] = 10000                # Test
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
     pipeline["Performance"]["loss"] = 0         # Set a default loss value
-    pipeline["Performance"]["bidirectional_network"] = 1   # To allow flow in both directions
-    pipeline["Performance"]["bidirectional_netowork_precise"] = 1   # Not allow flow in both directions at the same time
+    pipeline["Performance"]["bidirectional_network"] = 0   # 0:Not allow flow in both direction, 1:To allow flow in both directions
+    #pipeline["Performance"]["bidirectional_network_precise"] = 1   # 1:Not allow flow in both directions at the same time
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)
@@ -245,8 +245,10 @@ def data_processing():
     ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
     ship["Performance"]["loss"] = 0         # Set a default loss value
     ship["Performance"]["energyconsumption"]["electricity"]["cons_model"] = 1
-    ship["Performance"]["energyconsumption"]["electricity"]["k_flow"] = 0.009
+    ship["Performance"]["energyconsumption"]["electricity"]["k_flow"] = 0.009   # Set k_flow from Roussanaly et al., 2021 (DOI: 10.3390/en14185635)
     ship["Performance"]["energyconsumption"]["electricity"]["k_flowDistance"] = 0
+    for key in ["p", "c", "T", "eta", "gam", "LHV"]:
+        ship["Performance"]["energyconsumption"]["electricity"].pop(key, None)
     
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)
