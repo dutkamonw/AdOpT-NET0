@@ -165,7 +165,7 @@ def data_processing():
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
     topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-12-31 23:00"   # Test 1 year
+    topology["end_date"] = "2041-06-30 23:00"   # Test 6 months
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:

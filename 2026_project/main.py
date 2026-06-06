@@ -61,16 +61,16 @@ db_path = script_dir / "database.duckdb"
 ############################## [!!IMPORTANT!!]  IDENTIFY WHICH STEPS TO RUN ########################################################################################################
 
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
-initialize = True # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
-raw_prep = True # Step 2) ETL raw data to database
-data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
+initialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
+raw_prep = False # Step 2) ETL raw data to database
+data_process = False # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
 manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
 
-building_node_folder = True # Step 4) create node folders based on Topology.json
-prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
+building_node_folder = False # Step 4) create node folders based on Topology.json
+prepare_inputs = False # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = True # Step 13) run the optimization model
+run_model = False # Step 13) run the optimization model
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -175,9 +175,10 @@ if prepare_inputs:
         configuration = json.load(json_file)
 
     # Set optimization objective (select from existing options in ConfigModel.json)
-    #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+     #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
     configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
-    configuration["optimization"]["emission_limit"]["value"] = 33499354          # reduction 50% from total emission from all emitters in 1 year
+    configuration["optimization"]["emission_limit"]["value"] = 66998708.72*0.5*0.5/52          # Test 6 wmonths reduction 80% from total emission from all emitters in 1 year
+    #configuration["optimization"]["objective"]["value"] = "costs"
 
     # Set value to define MIP gap for the optimization solver
     configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
@@ -235,27 +236,7 @@ if prepare_inputs:
     output_path = path_model_input
     assign_technologies_to_nodes(input_path, output_path)
     print("Assigning technologies to nodes and updating emitter JSON files: Completed")
-
-    # Tighten emitter technology size_max to actual emission rate (+ 10% margin).
-    # The template value of 10000 t/h is a generic placeholder that creates an unrealistically
-    # large upper bound, causing Gurobi's matrix coefficient range to reach ~2e+12.
-    con = duckdb.connect(str(db_path))
-    try:
-        emitter_df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").df()
-    except:
-        emitter_df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'").df()
-    con.close()
-
-    for _, row in emitter_df.iterrows():
-        tec_path = path_model_input / "period1" / "node_data" / row["name"] / "technology_data" / f"emitter_{row['subsector']}.json"
-        if tec_path.exists():
-            with open(tec_path) as f:
-                tec_data = json.load(f)
-            tec_data["size_max"] = round(float(row["emission_TPH"]) * 1.1, 2)  # 10% margin above actual emission
-            with open(tec_path, "w") as f:
-                json.dump(tec_data, f, indent=4)
-    print(f"Tightened emitter size_max for {len(emitter_df)} nodes: Completed")
-
+    
     
     ########################## 10) Assign carrier data #########################
     
@@ -392,7 +373,7 @@ if prepare_inputs:
             # The geological capacity often exceeds what can be injected in 1 year, leaving a large
             # but unreachable upper bound that causes Gurobi numerical scaling warnings.
             # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
-            size_max = min(capacity, injection_rate * 365 * 24) # Test 1 year
+            size_max = min(capacity, injection_rate * 8760*0.5) # Test 6 months
 
             json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
         
@@ -413,7 +394,7 @@ if prepare_inputs:
     with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as f:
         node_names = json.load(f)["nodes"]
 
-    carbon_price = 200  # Assume
+    carbon_price = 0  # Assume
     success = 0
 
     for node in node_names:

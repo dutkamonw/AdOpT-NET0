@@ -398,6 +398,24 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
     rows = []
     base = h5_file_path.parent.parent.parent  # 2026_project/
     period_dir = base / "3_model_inputs" / "period1"
+    cfg = {}
+
+    def _add_row(parameter, value, unit="", description="", source=""):
+        rows.append(
+            {
+                "parameter": parameter,
+                "value": value,
+                "unit": unit,
+                "description": description,
+                "source": source,
+            }
+        )
+
+    def _to_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
     # ── ConfigModel.json ──────────────────────────────────
     cfg_path = base / "3_model_inputs" / "ConfigModel.json"
@@ -406,8 +424,7 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
             cfg = json.load(fh)
         def _cfg(section, key, unit="", description=""):
             val = cfg.get(section, {}).get(key, {}).get("value", "N/A")
-            rows.append({"parameter": f"{section}.{key}", "value": val,
-                         "unit": unit, "description": description, "source": "ConfigModel.json"})
+            _add_row(f"{section}.{key}", val, unit, description, "ConfigModel.json")
         _cfg("optimization", "objective", description="Optimization objective")
         _cfg("optimization", "emission_limit", "t CO2", "Emission limit (if objective = costs_emissionlimit)")
         _cfg("optimization", "pareto_points", description="Number of Pareto points")
@@ -419,35 +436,82 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
         _cfg("energybalance", "copperplate", description="Copper-plate energy balance (1=yes)")
         _cfg("economic", "global_discountrate", description="Global discount rate (-1 = per-technology)")
     except Exception as e:
-        rows.append({"parameter": "ConfigModel", "value": str(e), "unit": "", "description": "Error loading", "source": "ConfigModel.json"})
+        _add_row("ConfigModel", str(e), "", "Error loading", "ConfigModel.json")
 
     # ── Topology.json ─────────────────────────────────────
     topology_path = base / "3_model_inputs" / "Topology.json"
+    modelled_timesteps = None
+    hours_per_timestep = 1.0
+    modelled_hours = None
     try:
         with open(topology_path) as fh:
             topology = json.load(fh)
-        rows.append({
-            "parameter": "topology.start_date",
-            "value": topology.get("start_date", "N/A"),
-            "unit": "",
-            "description": "Model start datetime from Topology.json",
-            "source": "Topology.json",
-        })
-        rows.append({
-            "parameter": "topology.end_date",
-            "value": topology.get("end_date", "N/A"),
-            "unit": "",
-            "description": "Model end datetime from Topology.json",
-            "source": "Topology.json",
-        })
+        _add_row(
+            "topology.start_date",
+            topology.get("start_date", "N/A"),
+            "",
+            "Model start datetime from Topology.json",
+            "Topology.json",
+        )
+        _add_row(
+            "topology.end_date",
+            topology.get("end_date", "N/A"),
+            "",
+            "Model end datetime from Topology.json",
+            "Topology.json",
+        )
+
+        resolution = str(topology.get("resolution", "1h")).strip().lower()
+        if resolution.endswith("h"):
+            try:
+                hours_per_timestep = float(resolution[:-1])
+            except ValueError:
+                hours_per_timestep = 1.0
+
+        # Preferred source for timestamp count: operation results in H5.
+        with h5py.File(h5_file_path, "r") as fh:
+            raw_eb = extract_datasets_from_h5group(fh["operation"]["energy_balance"])
+        for arr in raw_eb.values():
+            arr_size = int(np.array(arr).size)
+            if arr_size > 0:
+                modelled_timesteps = arr_size
+                break
+
+        # Fallback to date range if operation data was not available.
+        if modelled_timesteps is None:
+            start = pd.to_datetime(topology.get("start_date"), errors="coerce")
+            end = pd.to_datetime(topology.get("end_date"), errors="coerce")
+            if pd.notna(start) and pd.notna(end) and hours_per_timestep > 0:
+                total_hours = (end - start).total_seconds() / 3600.0
+                if total_hours > 0:
+                    modelled_timesteps = int(round(total_hours / hours_per_timestep))
+
+        if modelled_timesteps is not None:
+            modelled_hours = modelled_timesteps * hours_per_timestep
+
+        _add_row(
+            "operation.n_timestamps",
+            modelled_timesteps if modelled_timesteps is not None else "N/A",
+            "-",
+            "Number of operation timesteps represented in H5",
+            "optimization_results.h5",
+        )
+        _add_row(
+            "operation.hours_per_timestep",
+            hours_per_timestep,
+            "h",
+            "Hours represented by each timestep (from Topology.json resolution)",
+            "Topology.json",
+        )
+        _add_row(
+            "operation.modelled_hours",
+            modelled_hours if modelled_hours is not None else "N/A",
+            "h",
+            "Total modelled operating hours (n_timestamps * hours_per_timestep)",
+            "optimization_results.h5 + Topology.json",
+        )
     except Exception as e:
-        rows.append({
-            "parameter": "Topology",
-            "value": str(e),
-            "unit": "",
-            "description": "Error loading",
-            "source": "Topology.json",
-        })
+        _add_row("Topology", str(e), "", "Error loading", "Topology.json")
 
     # ── Carbon cost ───────────────────────────────────────
     try:
@@ -460,12 +524,131 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
                 if "price" in df_cc.columns:
                     cc_val = pd.to_numeric(df_cc["price"], errors="coerce").dropna().iloc[0]
                     break
-        rows.append({"parameter": "carbon_price", "value": cc_val if cc_val is not None else "N/A",
-                     "unit": "€/t CO2", "description": "Carbon cost applied to all nodes",
-                     "source": "CarbonCost.csv"})
+        _add_row(
+            "carbon_price",
+            cc_val if cc_val is not None else "N/A",
+            "€/t CO2",
+            "Carbon cost applied to all nodes",
+            "CarbonCost.csv",
+        )
     except Exception as e:
-        rows.append({"parameter": "carbon_price", "value": str(e), "unit": "€/t CO2",
-                     "description": "Error loading", "source": "CarbonCost.csv"})
+        _add_row("carbon_price", str(e), "€/t CO2", "Error loading", "CarbonCost.csv")
+
+    # ── Storage constraints (size_max / injection_rate_max) ───────────────
+    try:
+        storage_jsons = sorted(
+            (period_dir / "node_data").glob("*/technology_data/PermanentStorage_CO2_simple.json")
+        )
+        storage_rows = []
+        for p in storage_jsons:
+            node_name = p.parts[-3]
+            with open(p) as fh:
+                jd = json.load(fh)
+            size_max = _to_float(jd.get("size_max"))
+            inj_max = _to_float(jd.get("Flexibility", {}).get("injection_rate_max"))
+            storage_rows.append((node_name, size_max, inj_max))
+
+        size_max_sum = sum(v for _, v, _ in storage_rows if v is not None)
+        inj_max_sum = sum(v for _, _, v in storage_rows if v is not None)
+
+        _add_row(
+            "storage.n_nodes",
+            len(storage_rows),
+            "-",
+            "Number of storage nodes with PermanentStorage_CO2_simple.json",
+            "period1/node_data/*/technology_data/PermanentStorage_CO2_simple.json",
+        )
+        _add_row(
+            "storage.size_max_total",
+            size_max_sum,
+            "t CO2",
+            "Sum of storage size_max across storage nodes (upper bound on injectable quantity in model horizon)",
+            "PermanentStorage_CO2_simple.json",
+        )
+        _add_row(
+            "storage.injection_rate_max_total",
+            inj_max_sum,
+            "t/h",
+            "Sum of injection_rate_max across storage nodes",
+            "PermanentStorage_CO2_simple.json",
+        )
+
+        # Add per-node visibility for auditability.
+        for node_name, size_max, inj_max in storage_rows:
+            _add_row(
+                f"storage.{node_name}.size_max",
+                size_max if size_max is not None else "N/A",
+                "t CO2",
+                "Storage size_max used to limit injectable quantity",
+                "PermanentStorage_CO2_simple.json",
+            )
+            _add_row(
+                f"storage.{node_name}.injection_rate_max",
+                inj_max if inj_max is not None else "N/A",
+                "t/h",
+                "Maximum storage injection rate",
+                "PermanentStorage_CO2_simple.json",
+            )
+    except Exception as e:
+        _add_row("storage_constraints", str(e), "", "Error loading", "node_data storage json")
+
+    # ── Emission limit + % reduction vs total emitter emissions ───────────
+    try:
+        objective = cfg.get("optimization", {}).get("objective", {}).get("value", "N/A") if cfg else "N/A"
+        emission_limit = _to_float(
+            cfg.get("optimization", {}).get("emission_limit", {}).get("value") if cfg else None
+        )
+
+        total_emission_tpa = None
+        if db_path.exists():
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                total_emission_tpa = con.execute(
+                    """
+                    SELECT SUM(CAST(emission_TPA AS DOUBLE))
+                    FROM combined_selected_final
+                    WHERE lower(type) = 'emitter' AND selection = 'Yes'
+                    """
+                ).fetchone()[0]
+                if total_emission_tpa is not None:
+                    total_emission_tpa = float(total_emission_tpa)
+            finally:
+                con.close()
+
+        _add_row(
+            "emission_limit.active",
+            "Yes" if str(objective) == "costs_emissionlimit" else "No",
+            "-",
+            "Whether net emission limit constraint is active (objective = costs_emissionlimit)",
+            "ConfigModel.json",
+        )
+        _add_row(
+            "emission_limit.value",
+            emission_limit if emission_limit is not None else "N/A",
+            "t CO2",
+            "Configured emission_limit",
+            "ConfigModel.json",
+        )
+        _add_row(
+            "emitters.total_emission_TPA",
+            total_emission_tpa if total_emission_tpa is not None else "N/A",
+            "t CO2/y",
+            "Total annual emissions from selected emitters (combined_selected_final)",
+            "database.duckdb",
+        )
+
+        reduction_pct = None
+        if (total_emission_tpa is not None) and (emission_limit is not None) and (total_emission_tpa > 0):
+            reduction_pct = ((total_emission_tpa - emission_limit) / total_emission_tpa) * 100.0
+        _add_row(
+            "emission_limit.reduction_percent",
+            reduction_pct if reduction_pct is not None else "N/A",
+            "%",
+            "((total_emission_from_emitters - emission_limit) / total_emission_from_emitters) * 100",
+            "ConfigModel.json + database.duckdb",
+        )
+    except Exception as e:
+        _add_row("emission_limit.reduction_percent", str(e), "%", "Error calculating", "ConfigModel.json + database.duckdb")
 
     # ── Network JSONs ─────────────────────────────────────
     for net_name in ["CO2_Pipeline", "CO2Ship"]:
@@ -476,36 +659,23 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
             eco = net.get("Economics", {})
             perf = net.get("Performance", {})
             prefix = net_name
-            rows.append({"parameter": f"{prefix}.loss", "value": perf.get("loss", "N/A"),
-                         "unit": "fraction/km", "description": "Transport loss per km",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.size_max", "value": net.get("size_max", "N/A"),
-                         "unit": "t/h", "description": "Maximum network arc size",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.capex_gamma1", "value": eco.get("gamma1", "N/A"),
-                         "unit": "€", "description": "CAPEX fixed term",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.capex_gamma2", "value": eco.get("gamma2", "N/A"),
-                         "unit": "€/(t/h) or €/(t/h/km)", "description": "CAPEX capacity or distance-based term",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.OPEX_variable", "value": eco.get("OPEX_variable", "N/A"),
-                         "unit": "€/t", "description": "Variable OPEX per tonne transported",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.OPEX_fixed", "value": eco.get("OPEX_fixed", "N/A"),
-                         "unit": "% of CAPEX", "description": "Fixed OPEX as fraction of CAPEX",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.discount_rate", "value": eco.get("discount_rate", "N/A"),
-                         "unit": "-", "description": "Discount rate for annualization",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.lifetime", "value": eco.get("lifetime", "N/A"),
-                         "unit": "years", "description": "Asset lifetime",
-                         "source": f"{net_name}.json"})
-            rows.append({"parameter": f"{prefix}.loss2emissions", "value": perf.get("loss2emissions", "N/A"),
-                         "unit": "-", "description": "Whether transport loss counts as CO2 emission",
-                         "source": f"{net_name}.json"})
+            _add_row(f"{prefix}.loss", perf.get("loss", "N/A"), "fraction/km", "Transport loss per km", f"{net_name}.json")
+            _add_row(f"{prefix}.size_max", net.get("size_max", "N/A"), "t/h", "Maximum network arc size", f"{net_name}.json")
+            _add_row(f"{prefix}.capex_gamma1", eco.get("gamma1", "N/A"), "€", "CAPEX fixed term", f"{net_name}.json")
+            _add_row(
+                f"{prefix}.capex_gamma2",
+                eco.get("gamma2", "N/A"),
+                "€/(t/h) or €/(t/h/km)",
+                "CAPEX capacity or distance-based term",
+                f"{net_name}.json",
+            )
+            _add_row(f"{prefix}.OPEX_variable", eco.get("OPEX_variable", "N/A"), "€/t", "Variable OPEX per tonne transported", f"{net_name}.json")
+            _add_row(f"{prefix}.OPEX_fixed", eco.get("OPEX_fixed", "N/A"), "% of CAPEX", "Fixed OPEX as fraction of CAPEX", f"{net_name}.json")
+            _add_row(f"{prefix}.discount_rate", eco.get("discount_rate", "N/A"), "-", "Discount rate for annualization", f"{net_name}.json")
+            _add_row(f"{prefix}.lifetime", eco.get("lifetime", "N/A"), "years", "Asset lifetime", f"{net_name}.json")
+            _add_row(f"{prefix}.loss2emissions", perf.get("loss2emissions", "N/A"), "-", "Whether transport loss counts as CO2 emission", f"{net_name}.json")
         except Exception as e:
-            rows.append({"parameter": f"{net_name}", "value": str(e), "unit": "",
-                         "description": "Error loading", "source": f"{net_name}.json"})
+            _add_row(f"{net_name}", str(e), "", "Error loading", f"{net_name}.json")
 
     return pd.DataFrame(rows)[["parameter", "value", "unit", "description", "source"]]
 
