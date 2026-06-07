@@ -254,6 +254,35 @@ with h5py.File(h5_file, "r") as f:
     raw_networks  = extract_datasets_from_h5group(f["design"]["networks"])
     raw_tec_op    = extract_datasets_from_h5group(f["operation"]["technology_operation"])
 
+# Shared annualization factor for node-level KPIs
+topology_cfg_path = Path(__file__).parent / "3_model_inputs" / "Topology.json"
+hours_per_timestep_nodes = 1.0
+try:
+    with open(topology_cfg_path) as fh:
+        topology_cfg = json.load(fh)
+    res = str(topology_cfg.get("resolution", "1h")).strip().lower()
+    if res.endswith("h"):
+        hours_per_timestep_nodes = float(res[:-1])
+except Exception:
+    hours_per_timestep_nodes = 1.0
+
+modelled_timesteps_nodes = 0
+for _k, _v in raw_tec_op.items():
+    arr_size = int(np.array(_v).size)
+    if arr_size > 0:
+        modelled_timesteps_nodes = arr_size
+        break
+modelled_hours_nodes = modelled_timesteps_nodes * hours_per_timestep_nodes if modelled_timesteps_nodes > 0 else 0.0
+annualization_factor_nodes = (8760.0 / modelled_hours_nodes) if modelled_hours_nodes > 0 else 1.0
+
+node_co2_captured_modelled = {}
+for k, v in raw_tec_op.items():
+    if not (isinstance(k, tuple) and len(k) == 4):
+        continue
+    _, node, _tec, var = k
+    if var == "CO2captured_var_output_ccs":
+        node_co2_captured_modelled[node] = node_co2_captured_modelled.get(node, 0.0) + float(np.array(v).sum())
+
 # ── Parse nodes into wide DataFrame ──────────────────────
 # Index = (period, node_name, technology, variable)
 NODE_VARS = [
@@ -403,11 +432,39 @@ nodes_combined = pd.concat([active_nodes, inactive_nodes], ignore_index=True)
 nodes_combined["iso2"] = nodes_combined["node"].map(
     lambda n: node_iso2_map.get(str(n).strip(), "")
 )
+nodes_combined["CO2_captured_t_modelled"] = nodes_combined["node"].map(
+    lambda n: node_co2_captured_modelled.get(str(n), 0.0)
+)
+nodes_combined["CO2_captured_t_annualized"] = (
+    pd.to_numeric(nodes_combined["CO2_captured_t_modelled"], errors="coerce").fillna(0.0)
+    * annualization_factor_nodes
+)
+nodes_combined["node_direct_cost_EUR"] = (
+    pd.to_numeric(nodes_combined.get("capex_tot", 0.0), errors="coerce").fillna(0.0)
+    + pd.to_numeric(nodes_combined.get("opex_fixed_tot", 0.0), errors="coerce").fillna(0.0)
+    + pd.to_numeric(nodes_combined.get("opex_variable", 0.0), errors="coerce").fillna(0.0)
+)
+# Capture-only excludes storage technologies and therefore isolates emitter-side capture cost.
+nodes_combined["node_capture_only_cost_EUR"] = np.where(
+    nodes_combined["node"].isin(storage_nodes),
+    0.0,
+    nodes_combined["node_direct_cost_EUR"],
+)
+nodes_combined["node_capture_only_cost_EUR_per_t"] = np.where(
+    nodes_combined["CO2_captured_t_annualized"] > 0,
+    nodes_combined["node_capture_only_cost_EUR"] / nodes_combined["CO2_captured_t_annualized"],
+    np.nan,
+)
+nodes_combined = nodes_combined.rename(
+    columns={"node_capture_only_cost_EUR_per_t": "node_capture_only_cost_EUR_per_t_annualized"}
+)
 
 combined_node_cols = ["node","status","iso2","role","technology","existing","size","size_ccs",
                       "capex_tec","capex_ccs","capex_tot",
                       "opex_fixed_tot","opex_fixed_ccs","opex_variable",
-                      "emissions_pos","emissions_neg","para_unitCAPEX"]
+                      "emissions_pos","emissions_neg","para_unitCAPEX",
+                      "CO2_captured_t_modelled","CO2_captured_t_annualized",
+                      "node_capture_only_cost_EUR","node_capture_only_cost_EUR_per_t_annualized"]
 combined_node_cols = [c for c in combined_node_cols if c in nodes_combined.columns]
 nodes_combined_out = nodes_combined[combined_node_cols].sort_values(
     ["status","role","node"]).reset_index(drop=True)
@@ -959,6 +1016,22 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         else None
     )
 
+    storage_direct_cost_system = float(
+        pd.to_numeric(stor_design.get("capex_tot", 0.0), errors="coerce").fillna(0.0).sum()
+        + pd.to_numeric(stor_design.get("opex_fixed_tot", 0.0), errors="coerce").fillna(0.0).sum()
+        + pd.to_numeric(stor_design.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum()
+    )
+    network_cost_system = float((cost_capex_netws or 0.0) + (cost_opex_netws or 0.0))
+    tec_total_system = float((cost_capex_tecs or 0.0) + (cost_opex_tecs or 0.0))
+    capture_only_cost_system = tec_total_system - storage_direct_cost_system
+    ts_cost_system = network_cost_system + storage_direct_cost_system
+    capture_only_cost_per_t = (
+        capture_only_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
+    )
+    ts_cost_per_t = (
+        ts_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
+    )
+
     # Cross-check (if all summary components exist):
     # base_system_cost = cost_tecs + cost_netws + cost_imports + cost_exports + violation_cost
     can_crosscheck = all(v is not None for v in [
@@ -1000,6 +1073,10 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "total_CO2_injected_annualized",  "value": total_co2_injected_annualized, "unit": "t CO2/y","note": "Modelled CO2 injected scaled to annual basis"},
         {"metric": "avg_capture_cost",               "value": avg_cost_overall,              "unit": "€/t CO2","note": "total_cost / total_CO2_injected_annualized"},
         {"metric": "avg_capture_cost_excl_carbon",   "value": avg_capture_cost_excl_carbon,  "unit": "€/t CO2","note": "total_cost_excl_carbon / total_CO2_injected_annualized"},
+        {"metric": "capture_only_cost_system",       "value": capture_only_cost_system,      "unit": "€",      "note": "Capture-only system cost (technology costs excluding storage technologies)"},
+        {"metric": "capture_only_cost_system_per_t_annualized", "value": capture_only_cost_per_t,       "unit": "€/t CO2","note": "Annualized: capture_only_cost_system / total_CO2_injected_annualized"},
+        {"metric": "TS_cost_system",                 "value": ts_cost_system,                "unit": "€",      "note": "Transport and storage system cost (network costs + storage technologies)"},
+        {"metric": "TS_cost_system_per_t_annualized",           "value": ts_cost_per_t,                 "unit": "€/t CO2","note": "Annualized: TS_cost_system / total_CO2_injected_annualized"},
     ]
     overall_df = pd.DataFrame(overall_rows)
 
@@ -1084,12 +1161,15 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
             ]
 
             comp_node_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set))
+            comp_storage_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set if n in stor_node_names))
             comp_arc_cost = float(
                 pd.to_numeric(comp_arcs.get("capex", 0.0), errors="coerce").fillna(0.0).sum()
                 + pd.to_numeric(comp_arcs.get("opex_fixed", 0.0), errors="coerce").fillna(0.0).sum()
                 + pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum()
             )
             comp_total_cost = comp_node_cost + comp_arc_cost
+            comp_capture_only_cost = comp_node_cost - comp_storage_cost
+            comp_ts_cost = comp_storage_cost + comp_arc_cost
 
             comp_injected_modelled = float(sum(stor_co2_inflow.get(n, 0.0) for n in comp_set))
             comp_injected_annualized = comp_injected_modelled * annualization_factor
@@ -1115,11 +1195,19 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
                     "n_arcs": len(comp_arcs),
                     "nodes": " | ".join(comp_nodes),
                     "node_direct_cost_EUR": comp_node_cost,
+                    "capture_only_cost_EUR": comp_capture_only_cost,
+                    "TS_cost_EUR": comp_ts_cost,
                     "network_cost_EUR": comp_arc_cost,
                     "full_chain_cost_EUR": comp_total_cost,
                     "CO2_injected_t_modelled": comp_injected_modelled,
                     "CO2_injected_t_annualized": comp_injected_annualized,
-                    "full_chain_capture_cost_EUR_per_t": comp_cost_per_t,
+                    "full_chain_capture_cost_EUR_per_t_annualized": comp_cost_per_t,
+                    "capture_only_cost_EUR_per_t_annualized": (
+                        comp_capture_only_cost / comp_injected_annualized if comp_injected_annualized > 0 else None
+                    ),
+                    "TS_cost_EUR_per_t_annualized": (
+                        comp_ts_cost / comp_injected_annualized if comp_injected_annualized > 0 else None
+                    ),
                     "allocation_basis": allocation_basis,
                 }
             )
