@@ -174,6 +174,53 @@ def load_ship_route_geometries(base_dir):
    
     return route_map
 
+
+def load_manual_pipeline_geometries(base_dir):
+    """Load manual pipeline WKT geometry from pipeline_network_manual_edit.xlsx.
+    Returns dict keyed by normalized (from_name, to_name) with reversed geometry too.
+    """
+    inter_dir = base_dir / "2_data_processed" / "intermediate_output"
+    manual_path = inter_dir / "pipeline_network_manual_edit.xlsx"
+
+    route_map = {}
+    if not manual_path.exists():
+        return route_map
+
+    try:
+        df = pd.read_excel(manual_path)
+    except Exception as exc:
+        print(f"⚠️ Could not read manual pipeline file: {manual_path} ({exc})")
+        return route_map
+
+    required = {"from_name", "to_name", "geometry_wkt"}
+    if not required.issubset(df.columns):
+        print("[INFO] Manual pipeline geometry not used: missing one of from_name/to_name/geometry_wkt")
+        return route_map
+
+    work = df.copy()
+    if "selection" in work.columns:
+        sel = work["selection"].astype(str).str.strip().str.lower()
+        work = work[sel == "yes"]
+
+    added = 0
+    for _, r in work.iterrows():
+        geom = parse_linestring_wkt(r.get("geometry_wkt"))
+        if geom is None:
+            continue
+        f = normalize(repair_name(r.get("from_name", "")))
+        t = normalize(repair_name(r.get("to_name", "")))
+        if not f or not t:
+            continue
+
+        key = (f, t)
+        rev_key = (t, f)
+        route_map[key] = geom
+        route_map[rev_key] = list(reversed(geom))
+        added += 1
+
+    print(f"Loaded manual pipeline geometries ({manual_path.name}: {added})")
+    return route_map
+
 def flatten_dict(raw):
     """Flatten nested dict into a single-column DataFrame keyed by tuple path."""
     if isinstance(raw, pd.DataFrame):
