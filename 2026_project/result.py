@@ -48,10 +48,22 @@ except Exception as e:
     print(f"[WARN] Could not load iso2 map from database: {e}")
 
 # Set the exact run file here (single-run mode).
-h5_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260604022706-1\optimization_results.h5")
+h5_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260607043639-1_3M_SL10K_MG2_L0_NF0_CC0_LQ_80%\optimization_results.h5")
 node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
 output_excel  = h5_file.parent / "results.xlsx"
 output_map    = h5_file.parent / "network_map.html"
+
+# ── SCENARIO CONFIGURATION (keep in sync with main.py) ──────────────────────────────────────
+# Set SCENARIO to the same value used in main.py when this result was generated.
+# Used to name the capacity-tracking JSON output.
+SCENARIO = "Base"  # ← CHANGE THIS: "Conservative", "Base", or "Optimistic"
+
+SCENARIO_CONFIG = {
+    "Conservative": {"label": "Conservative_EarlyPhase",  "opex_var_storage_EUR_per_t": 75.8},
+    "Base":         {"label": "Base_MidPhase",             "opex_var_storage_EUR_per_t": 50.6},
+    "Optimistic":   {"label": "Optimistic_MaturePhase",    "opex_var_storage_EUR_per_t": 42.5},
+}
+_sc_result = SCENARIO_CONFIG[SCENARIO]
 
 # ══════════════════════════════════════════════════════════
 # HELPERS
@@ -178,6 +190,9 @@ def load_ship_route_geometries(base_dir):
 def load_manual_pipeline_geometries(base_dir):
     """Load manual pipeline WKT geometry from pipeline_network_manual_edit.xlsx.
     Returns dict keyed by normalized (from_name, to_name) with reversed geometry too.
+    Geometry is loaded for ANY row with a valid geometry_wkt, regardless of selection status.
+    (The selection filter is intentionally omitted: geometry is only used when a route is
+    already drawn as an active model arc, so extra entries in the map are harmless.)
     """
     inter_dir = base_dir / "2_data_processed" / "intermediate_output"
     manual_path = inter_dir / "pipeline_network_manual_edit.xlsx"
@@ -197,28 +212,21 @@ def load_manual_pipeline_geometries(base_dir):
         print("[INFO] Manual pipeline geometry not used: missing one of from_name/to_name/geometry_wkt")
         return route_map
 
-    work = df.copy()
-    if "selection" in work.columns:
-        sel = work["selection"].astype(str).str.strip().str.lower()
-        work = work[sel == "yes"]
-
     added = 0
-    for _, r in work.iterrows():
+    for _, r in df.iterrows():
         geom = parse_linestring_wkt(r.get("geometry_wkt"))
         if geom is None:
             continue
-        f = normalize(repair_name(r.get("from_name", "")))
-        t = normalize(repair_name(r.get("to_name", "")))
+        f = normalize(repair_name(str(r.get("from_name", ""))))
+        t = normalize(repair_name(str(r.get("to_name", ""))))
         if not f or not t:
             continue
 
-        key = (f, t)
-        rev_key = (t, f)
-        route_map[key] = geom
-        route_map[rev_key] = list(reversed(geom))
+        route_map[(f, t)] = geom
+        route_map[(t, f)] = list(reversed(geom))
         added += 1
 
-    print(f"Loaded manual pipeline geometries ({manual_path.name}: {added})")
+    print(f"Loaded manual pipeline geometries ({manual_path.name}: {added} routes with WKT)")
     return route_map
 
 def flatten_dict(raw):
@@ -384,6 +392,21 @@ storage_nodes = set(
 )
 sink_like_nodes = (to_set - from_set) | storage_nodes
 
+# Directed graph: used to trace which storage node each emitter/transit ultimately feeds into.
+_digraph = nx.DiGraph()
+_digraph.add_edges_from(active_arcs[["fromNode", "toNode"]].itertuples(index=False, name=None))
+
+def _final_storage(node):
+    """Return the storage node(s) reachable downstream from this node in the active CO2 network."""
+    if node in storage_nodes:
+        return node
+    try:
+        reachable = nx.descendants(_digraph, node)
+    except nx.NetworkXError:
+        return ""
+    destinations = sorted(reachable & storage_nodes)
+    return " | ".join(destinations) if destinations else ""
+
 active_graph = nx.Graph()
 active_graph.add_nodes_from(active_nodes_set)
 active_graph.add_edges_from(active_arcs[["fromNode", "toNode"]].itertuples(index=False, name=None))
@@ -439,10 +462,15 @@ nodes_combined["CO2_captured_t_annualized"] = (
     pd.to_numeric(nodes_combined["CO2_captured_t_modelled"], errors="coerce").fillna(0.0)
     * annualization_factor_nodes
 )
+# Final storage: downstream geological storage node(s) this node ultimately sends CO2 to.
+nodes_combined["final_storage"] = nodes_combined["node"].apply(_final_storage)
+
+# capex_tot and opex_fixed_tot are already annualized in the H5 design output.
+# opex_variable is the raw modelled-period total and must be scaled to annual basis.
 nodes_combined["node_direct_cost_EUR"] = (
     pd.to_numeric(nodes_combined.get("capex_tot", 0.0), errors="coerce").fillna(0.0)
     + pd.to_numeric(nodes_combined.get("opex_fixed_tot", 0.0), errors="coerce").fillna(0.0)
-    + pd.to_numeric(nodes_combined.get("opex_variable", 0.0), errors="coerce").fillna(0.0)
+    + pd.to_numeric(nodes_combined.get("opex_variable", 0.0), errors="coerce").fillna(0.0) * annualization_factor_nodes
 )
 # Capture-only excludes storage technologies and therefore isolates emitter-side capture cost.
 nodes_combined["node_capture_only_cost_EUR"] = np.where(
@@ -459,7 +487,7 @@ nodes_combined = nodes_combined.rename(
     columns={"node_capture_only_cost_EUR_per_t": "node_capture_only_cost_EUR_per_t_annualized"}
 )
 
-combined_node_cols = ["node","status","iso2","role","technology","existing","size","size_ccs",
+combined_node_cols = ["node","status","iso2","role","final_storage","technology","existing","size","size_ccs",
                       "capex_tec","capex_ccs","capex_tot",
                       "opex_fixed_tot","opex_fixed_ccs","opex_variable",
                       "emissions_pos","emissions_neg","para_unitCAPEX",
@@ -1016,20 +1044,33 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         else None
     )
 
+    # In H5 design, storage opex_variable is modelled-period total and must be annualized.
     storage_direct_cost_system = float(
         pd.to_numeric(stor_design.get("capex_tot", 0.0), errors="coerce").fillna(0.0).sum()
         + pd.to_numeric(stor_design.get("opex_fixed_tot", 0.0), errors="coerce").fillna(0.0).sum()
-        + pd.to_numeric(stor_design.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum()
+        + pd.to_numeric(stor_design.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum() * annualization_factor
     )
     network_cost_system = float((cost_capex_netws or 0.0) + (cost_opex_netws or 0.0))
     tec_total_system = float((cost_capex_tecs or 0.0) + (cost_opex_tecs or 0.0))
     capture_only_cost_system = tec_total_system - storage_direct_cost_system
     ts_cost_system = network_cost_system + storage_direct_cost_system
+    lccs_cost_excl_imports_exports = capture_only_cost_system + ts_cost_system
+    import_export_net_cost_system = float((cost_imports or 0.0) + (cost_exports or 0.0))
+    total_minus_lccs = (total_cost - lccs_cost_excl_imports_exports) if total_cost is not None else None
+    lccs_share_of_total = (
+        lccs_cost_excl_imports_exports / total_cost if (total_cost is not None and total_cost != 0) else None
+    )
     capture_only_cost_per_t = (
         capture_only_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     )
     ts_cost_per_t = (
         ts_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
+    )
+    lccs_cost_per_t_excl_imports_exports = (
+        lccs_cost_excl_imports_exports / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
+    )
+    import_export_net_cost_per_t = (
+        import_export_net_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     )
 
     # Cross-check (if all summary components exist):
@@ -1077,6 +1118,12 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "capture_only_cost_system_per_t_annualized", "value": capture_only_cost_per_t,       "unit": "€/t CO2","note": "Annualized: capture_only_cost_system / total_CO2_injected_annualized"},
         {"metric": "TS_cost_system",                 "value": ts_cost_system,                "unit": "€",      "note": "Transport and storage system cost (network costs + storage technologies)"},
         {"metric": "TS_cost_system_per_t_annualized",           "value": ts_cost_per_t,                 "unit": "€/t CO2","note": "Annualized: TS_cost_system / total_CO2_injected_annualized"},
+        {"metric": "LCCS_cost_excl_imports_exports", "value": lccs_cost_excl_imports_exports, "unit": "€",      "note": "Capture + T&S only (excludes imports/exports, carbon, and violation terms)"},
+        {"metric": "LCCS_cost_per_t_excl_imports_exports_annualized", "value": lccs_cost_per_t_excl_imports_exports, "unit": "€/t CO2", "note": "Annualized: LCCS_cost_excl_imports_exports / total_CO2_injected_annualized"},
+        {"metric": "import_export_net_cost_system",  "value": import_export_net_cost_system, "unit": "€",      "note": "cost_imports + cost_exports from summary"},
+        {"metric": "import_export_net_cost_per_t_annualized", "value": import_export_net_cost_per_t, "unit": "€/t CO2", "note": "Annualized: (cost_imports + cost_exports) / total_CO2_injected_annualized"},
+        {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "Residual vs LCCS (mostly imports/exports and policy/slack terms)"},
+        {"metric": "LCCS_share_of_total_cost",       "value": lccs_share_of_total,           "unit": "-",      "note": "LCCS_cost_excl_imports_exports / total_cost"},
     ]
     overall_df = pd.DataFrame(overall_rows)
 
@@ -1089,7 +1136,9 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         opex_f  = float(design_row["opex_fixed_tot"].values[0]) if not design_row.empty else 0.0
         opex_v  = float(design_row["opex_variable"].values[0]) if not design_row.empty else 0.0
         inj_cap = float(design_row["injection_capacity"].values[0]) if not design_row.empty else 0.0
-        direct_cost = capex_t + opex_f + opex_v
+        # opex_variable from H5 design is modelled-period total; annualize it to match annualized CO2 denominator
+        opex_v_annualized = opex_v * annualization_factor
+        direct_cost = capex_t + opex_f + opex_v_annualized
         co2_t_annualized = co2_t * annualization_factor
         cost_per_t = direct_cost / co2_t_annualized if co2_t_annualized > 0 else None
         per_stor_rows.append({
@@ -1097,11 +1146,12 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
             "CO2_injected_t_modelled": co2_t,
             "CO2_injected_t_annualized": co2_t_annualized,
             "injection_capacity_tph": inj_cap,
-            "capex_tot_EUR": capex_t,
-            "opex_fixed_EUR": opex_f,
-            "opex_variable_EUR": opex_v,
-            "direct_cost_EUR": direct_cost,
-            "direct_cost_per_tCO2": cost_per_t,
+            "capex_tot_EUR_annualized": capex_t,
+            "opex_fixed_EUR_annualized": opex_f,
+            "opex_variable_EUR_modelled": opex_v,
+            "opex_variable_EUR_annualized": opex_v_annualized,
+            "direct_cost_EUR_annualized": direct_cost,
+            "direct_cost_per_tCO2_annualized": cost_per_t,
         })
 
     per_stor_df = pd.DataFrame(per_stor_rows).sort_values("CO2_injected_t_annualized", ascending=False).reset_index(drop=True)
@@ -1124,10 +1174,11 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
             opex_variable=("opex_variable", "sum"),
         )
     )
+    # opex_variable from H5 design is modelled-period total; annualize before summing with already-annualized capex/opex_fixed
     node_cost_df["node_cost_total"] = (
         pd.to_numeric(node_cost_df["capex_tot"], errors="coerce").fillna(0.0)
         + pd.to_numeric(node_cost_df["opex_fixed_tot"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(node_cost_df["opex_variable"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(node_cost_df["opex_variable"], errors="coerce").fillna(0.0) * annualization_factor
     )
     node_cost_map = dict(zip(node_cost_df["node"], node_cost_df["node_cost_total"]))
 
@@ -1162,10 +1213,11 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
 
             comp_node_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set))
             comp_storage_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set if n in stor_node_names))
+            # capex and opex_fixed for arcs are annualized in H5 design output; opex_variable is modelled-period total
             comp_arc_cost = float(
                 pd.to_numeric(comp_arcs.get("capex", 0.0), errors="coerce").fillna(0.0).sum()
                 + pd.to_numeric(comp_arcs.get("opex_fixed", 0.0), errors="coerce").fillna(0.0).sum()
-                + pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum()
+                + pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum() * annualization_factor
             )
             comp_total_cost = comp_node_cost + comp_arc_cost
             comp_capture_only_cost = comp_node_cost - comp_storage_cost
@@ -1291,6 +1343,117 @@ co2_capture_overall_df, co2_capture_per_stor_df, co2_capture_per_component_df, c
     h5_file, nodes_wide, networks_wide, raw_summary
 )
 
+# ── Save per-storage capacity tracking JSON for the next scenario run ──────────────────────
+# Used by main.py step 11 (2045 and 2050) to deduct prior injections from geological capacity.
+_cap_T_map = {}
+if db_path.exists():
+    try:
+        _con = duckdb.connect(str(db_path), read_only=True)
+        _cap_df = _con.execute(
+            "SELECT name_sanitized, capacity_T FROM combined_selected_final "
+            "WHERE type = 'storage' AND selection = 'Yes'"
+        ).df()
+        _con.close()
+        _cap_T_map = {
+            str(r["name_sanitized"]): float(r["capacity_T"])
+            for _, r in _cap_df.iterrows()
+            if pd.notna(r["capacity_T"])
+        }
+    except Exception as _e:
+        print(f"[WARN] Could not read capacity_T from DB for tracking: {_e}")
+
+_capacity_tracking = {}
+for _, _row in co2_capture_per_stor_df.iterrows():
+    _node = str(_row["node"])
+    _capacity_tracking[_node] = {
+        "CO2_injected_t_modelled":   float(_row["CO2_injected_t_modelled"]),
+        "CO2_injected_t_annualized": float(_row["CO2_injected_t_annualized"]),
+        "injection_capacity_tph":    float(_row["injection_capacity_tph"]),
+        "opex_var_EUR_per_t":        _sc_result["opex_var_storage_EUR_per_t"],
+        "geological_capacity_T":     _cap_T_map.get(_node),
+    }
+
+_af_val = None
+_af_rows = co2_capture_overall_df.loc[co2_capture_overall_df["metric"] == "annualization_factor", "value"]
+if not _af_rows.empty:
+    try:
+        _af_val = float(_af_rows.iloc[0])
+    except (ValueError, TypeError):
+        pass
+
+_capacity_json_path = Path(__file__).parent / "results" / f"capacity_used_{SCENARIO}.json"
+_capacity_json_path.parent.mkdir(parents=True, exist_ok=True)
+with open(_capacity_json_path, "w", encoding="utf-8") as _fh:
+    json.dump({
+        "scenario":             SCENARIO,
+        "label":                _sc_result["label"],
+        "run_folder":           h5_file.parent.name,
+        "annualization_factor": _af_val,
+        "storage_nodes":        _capacity_tracking,
+    }, _fh, indent=4)
+print(f"Saved capacity tracking -> {_capacity_json_path}")
+
+# ── Build Storage_Utilization DataFrame ──────────────────────────────────────────────────────
+# Re-read storage JSONs for size_max / injection_rate_max / OPEX_variable as written by main.py.
+_stor_json_params = {}
+_stor_json_dir = h5_file.parent.parent.parent / "3_model_inputs" / "period1" / "node_data"
+try:
+    for _p in sorted(_stor_json_dir.glob("*/technology_data/PermanentStorage_CO2_simple.json")):
+        _nn2 = _p.parts[-3]
+        with open(_p) as _fj:
+            _jd = json.load(_fj)
+        _stor_json_params[_nn2] = {
+            "size_max_t":             _jd.get("size_max"),
+            "injection_rate_max_tph": _jd.get("Flexibility", {}).get("injection_rate_max"),
+            "opex_var_EUR_per_t":     _jd.get("OPEX_variable"),
+        }
+except Exception as _e2:
+    print(f"[WARN] Could not read storage JSONs for utilization sheet: {_e2}")
+
+# For each storage node, find which emitter/transit nodes feed into it via the directed graph.
+_emitters_per_storage = {}
+for _sn2 in storage_nodes:
+    if _sn2 not in _digraph:
+        _emitters_per_storage[_sn2] = []
+        continue
+    _upstream = nx.ancestors(_digraph, _sn2)
+    # Only pure emitters (send CO2 but not a storage themselves)
+    _emitters_per_storage[_sn2] = sorted(
+        n for n in _upstream
+        if n in from_set and n not in storage_nodes
+    )
+
+_stor_util_rows = []
+for _, _sr in co2_capture_per_stor_df.iterrows():
+    _nn2 = str(_sr["node"])
+    _geo_cap2 = _cap_T_map.get(_nn2)
+    _jp = _stor_json_params.get(_nn2, {})
+    _size_max2  = _jp.get("size_max_t")
+    _inj_max2   = _jp.get("injection_rate_max_tph")
+    _opex_v2    = _jp.get("opex_var_EUR_per_t")
+    _co2_mod2   = float(_sr["CO2_injected_t_modelled"])
+    _co2_ann2   = float(_sr["CO2_injected_t_annualized"])
+    _emits2     = _emitters_per_storage.get(_nn2, [])
+    _stor_util_rows.append({
+        "storage_node":                   _nn2,
+        "geological_capacity_T":          _geo_cap2,
+        "size_max_t":                     _size_max2,
+        "injection_rate_max_tph":         _inj_max2,
+        "opex_var_EUR_per_t":             _opex_v2,
+        "CO2_injected_t_modelled":        _co2_mod2,
+        "CO2_injected_t_annualized":      _co2_ann2,
+        "pct_size_max_used":              (_co2_mod2 / _size_max2 * 100) if _size_max2 else None,
+        "pct_geo_cap_annualized":         (_co2_ann2 / _geo_cap2 * 100) if _geo_cap2 else None,
+        "remaining_geo_cap_t_annualized": (_geo_cap2 - _co2_ann2) if _geo_cap2 else None,
+        "n_emitters_assigned":            len(_emits2),
+        "emitters_assigned":              " | ".join(_emits2),
+    })
+
+storage_utilization_df = pd.DataFrame(_stor_util_rows).sort_values(
+    "CO2_injected_t_annualized", ascending=False
+).reset_index(drop=True)
+storage_utilization_df.index += 1
+
 # ══════════════════════════════════════════════════════════
 # PRINT SANITY CHECK TABLES
 # ══════════════════════════════════════════════════════════
@@ -1383,6 +1546,55 @@ def _write_results_excel(target_path: Path):
             f"per_component={co2_capture_per_component_df.shape}, "
             f"emitter_alloc={co2_capture_emitter_alloc_df.shape}"
         )
+
+        # Storage_Utilization: per-storage capacity used / remaining + assigned emitters
+        if not storage_utilization_df.empty:
+            storage_utilization_df.to_excel(writer, sheet_name="Storage_Utilization")
+            print(f"  ✅ Storage_Utilization: {storage_utilization_df.shape}")
+
+        # ── Scenario comparison sheet (Conservative / Base / Optimistic) ───────────────────
+        # Loads capacity_used_SCENARIO.json from all three sensitivity runs and puts them
+        # side-by-side for easy comparison. Written once all three JSONs exist.
+        _results_dir = Path(__file__).parent / "results"
+        _scen_data = {}
+        for _sn in ["Conservative", "Base", "Optimistic"]:
+            _cap_file = _results_dir / f"capacity_used_{_sn}.json"
+            if _cap_file.exists():
+                with open(_cap_file, "r", encoding="utf-8") as _fh2:
+                    _scen_data[_sn] = json.load(_fh2)
+
+        if len(_scen_data) >= 1:
+            _all_nodes_s = set()
+            for _sd in _scen_data.values():
+                _all_nodes_s.update(_sd.get("storage_nodes", {}).keys())
+
+            _scen_rows = []
+            for _node in sorted(_all_nodes_s):
+                _row_s = {"storage_node": _node}
+                _geo_cap_s = None
+                for _sn2 in ["Conservative", "Base", "Optimistic"]:
+                    if _sn2 not in _scen_data:
+                        continue
+                    _nd2 = _scen_data[_sn2].get("storage_nodes", {}).get(_node, {})
+                    _co2_ann2 = float(_nd2.get("CO2_injected_t_annualized", 0.0))
+                    _opex_v2  = float(_nd2.get("opex_var_EUR_per_t",
+                                              SCENARIO_CONFIG[_sn2]["opex_var_storage_EUR_per_t"]))
+                    if _geo_cap_s is None and _nd2.get("geological_capacity_T") is not None:
+                        _geo_cap_s = float(_nd2["geological_capacity_T"])
+                    _row_s[f"{_sn2}.CO2_injected_tpy"]        = _co2_ann2
+                    _row_s[f"{_sn2}.storage_OPEX_EUR_per_yr"] = _co2_ann2 * _opex_v2
+                    _row_s[f"{_sn2}.OPEX_var_EUR_per_t"]      = _opex_v2
+                _row_s["geological_capacity_T"] = _geo_cap_s
+                _scen_rows.append(_row_s)
+
+            _scen_cmp_df = pd.DataFrame(_scen_rows)
+            _scen_cmp_df.to_excel(writer, sheet_name="Scenario_Comparison", index=False)
+            print(
+                f"  ✅ Scenario_Comparison: {_scen_cmp_df.shape} "
+                f"(scenarios present: {sorted(_scen_data.keys())})"
+            )
+        else:
+            print("  ⏭ Scenario_Comparison: No capacity_used_SCENARIO.json found yet.")
 
 
 actual_output_excel = output_excel

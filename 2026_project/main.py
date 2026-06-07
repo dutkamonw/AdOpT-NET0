@@ -61,17 +61,50 @@ db_path = script_dir / "database.duckdb"
 ############################## [!!IMPORTANT!!]  IDENTIFY WHICH STEPS TO RUN ########################################################################################################
 
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
-initialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
-raw_prep = False # Step 2) ETL raw data to database
-data_process = False # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
+initialize = True # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
+raw_prep = True # Step 2) ETL raw data to database
+data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
 manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
 
-building_node_folder = False # Step 4) create node folders based on Topology.json
-prepare_inputs = False # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
+building_node_folder = True # Step 4) create node folders based on Topology.json
+prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
 run_model = False # Step 13) run the optimization model
 
+############################### SCENARIO CONFIGURATION ########################################
+# Sensitivity analysis: three CO2 storage cost/rate scenarios for a 2050-representative system.
+# Infrastructure (routes, CAPEX) is fully co-optimized in each run → results are self-consistent.
+
+# The High/Medium/Low levelised storage cost are from Italian report "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic and regulatory aspects functional to the development of the CCUS supply chain], by Ministero dell'Ambiente e della Sicurezza Energetica [Ministry of Environment and Energy Security], 2024.
+# So, use them as OPEX variable for storage to cover all costs related to storage
+# The injection rate is set as a fraction of geological storage capacity per year, approximately from ramp up strategy in Ravenna and Prinos
+
+SCENARIO = "Base"
+
+SCENARIO_CONFIG = {
+    "Conservative": {
+        "label":                       "Conservative_EarlyPhase",
+        "injection_rate_pct_per_year": 0.02,    # 2 % of total capacity per year
+        "opex_var_storage_EUR_per_t":  75.8,
+    },
+    "Base": {
+        "label":                       "Base_MidPhase",
+        "injection_rate_pct_per_year": 0.04,    # 4 % of total capacity per year
+        "opex_var_storage_EUR_per_t":  50.6,
+    },
+    "Optimistic": {
+        "label":                       "Optimistic_MaturePhase",
+        "injection_rate_pct_per_year": 0.06,    # 6 % of total capacity per year
+        "opex_var_storage_EUR_per_t":  42.5,
+    },
+}
+_sc = SCENARIO_CONFIG[SCENARIO]
+
+print(f"SCENARIO: {SCENARIO}  ({_sc['label']})")
+print(f"  injection_rate_pct/yr : {_sc['injection_rate_pct_per_year']*100:.0f} %")
+print(f"  OPEX_var storage      : {_sc['opex_var_storage_EUR_per_t']} EUR/t")
+print(f"{'='*60}\n")
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
 
@@ -159,6 +192,15 @@ print("="*100)
 ############################   Preparation all inputs in model_input folder  #####################################################################
 print(f"Preparation inputs is {prepare_inputs}")
 
+# Auto-compute fraction of year modelled from Topology.json start/end dates. This is used to scale emission_limit and storage size_max consistently.
+with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as _topo_f:
+    _topo = json.load(_topo_f)
+_topo_start = pd.Timestamp(_topo["start_date"])
+_topo_end   = pd.Timestamp(_topo["end_date"])
+_modelled_hours = (_topo_end - _topo_start).total_seconds() / 3600 + 1  # +1 to include last hour
+fraction_of_year_modelled = _modelled_hours / 8760
+print(f"Topology period: {_topo_start.date()} → {_topo_end.date()} | {_modelled_hours:.0f} h | fraction={fraction_of_year_modelled:.4f}")
+
 if prepare_inputs:
 
     ################## 5) Update NodeLocations.csv for model input (Query the database to get unique node locations from combined_selected table in database.duckdb) #######################
@@ -177,7 +219,11 @@ if prepare_inputs:
     # Set optimization objective (select from existing options in ConfigModel.json)
      #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
     configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
-    configuration["optimization"]["emission_limit"]["value"] = 66998708.72*0.5*0.5/52          # Test 6 wmonths reduction 80% from total emission from all emitters in 1 year
+    # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
+    # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
+    annual_total_emission = 66998708.72   # tCO2/year from all selected emitters
+    ccs_reduction_target  = 0.2           # 1.0 = no constraint, 0.2 = allow only 20% of baseline (80% reduction)
+    configuration["optimization"]["emission_limit"]["value"] = annual_total_emission * fraction_of_year_modelled * ccs_reduction_target
     #configuration["optimization"]["objective"]["value"] = "costs"
 
     # Set value to define MIP gap for the optimization solver
@@ -351,8 +397,8 @@ if prepare_inputs:
 
     print("Filled carrier data for all nodes: Completed")
 
-    ######################### 11) Update storage injection rate  #########################
-    
+    ######################### 11) Update storage injection rate & OPEX_var (scenario-aware) ########
+
     con = duckdb.connect(str(db_path))
     try:
         storage_df = con.execute(""" SELECT name_sanitized AS node_name, capacity_T FROM combined_selected_final WHERE type = 'storage' AND selection = 'Yes' """).fetchdf()
@@ -362,30 +408,35 @@ if prepare_inputs:
 
     if not storage_df.empty:
         for _, row in storage_df.iterrows():
-            if pd.notna(row['capacity_T']):
-                capacity = float(row['capacity_T'])
+            if pd.isna(row['capacity_T']):
+                continue
+            capacity = float(row['capacity_T'])
+            node_name = str(row['node_name'])
 
+            # Injection rate = scenario fraction of geological capacity (t/h)
+            injection_rate = capacity * _sc["injection_rate_pct_per_year"] / 8760
 
-            # Assuming the storage can be fully charged or discharged within 25 years in tonne per hour (T/h)
-            injection_rate = capacity / (25 * 365 * 24)  # Convert to T/h
+            # size_max caps injectable CO2 over the modelled horizon (physically achievable upper bound).
+            # Uses fraction_of_year_modelled so it updates automatically when Topology dates change.
+            size_max = min(capacity, injection_rate * 8760 * fraction_of_year_modelled)
 
-            # Cap size_max at what is physically achievable within 1 year (the model horizon: 8760 h).
-            # The geological capacity often exceeds what can be injected in 1 year, leaving a large
-            # but unreachable upper bound that causes Gurobi numerical scaling warnings.
-            # min(capacity, injection_rate * 8760) keeps the bound tight and consistent.
-            size_max = min(capacity, injection_rate * 8760*0.5) # Test 6 months
+            json_path = (path_model_input / "period1" / "node_data" / node_name
+                         / "technology_data" / "PermanentStorage_CO2_simple.json")
 
-            json_path = path_model_input / "period1" / "node_data" / row['node_name'] / "technology_data" / "PermanentStorage_CO2_simple.json"
-        
             if json_path.exists():
                 with open(json_path, 'r') as f:
                     data = json.load(f)
-                data["size_max"] = round(size_max, 2)   # size_max = max achievable storage in model horizon
+                data["size_max"] = round(size_max, 2)
                 data["Flexibility"]["injection_rate_max"] = round(injection_rate, 4)
+                # Set levelised storage cost for this scenario (amortised CAPEX + OPEX per tCO2)
+                data["OPEX_variable"] = _sc["opex_var_storage_EUR_per_t"]
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
-    
-    print(f"Updated storage injection rate for {len(storage_df)} storage nodes: Completed")
+
+    print(
+        f"Updated injection rate & OPEX_var ({_sc['opex_var_storage_EUR_per_t']} EUR/t) "
+        f"for {len(storage_df)} storage nodes: Completed"
+    )
 
 
 

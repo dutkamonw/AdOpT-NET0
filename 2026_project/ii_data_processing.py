@@ -165,7 +165,7 @@ def data_processing():
     topology["carriers"] = carrier_list
     topology["investment_periods"] = ["period1"]
     topology["start_date"] =  "2041-01-01 00:00"
-    topology["end_date"] = "2041-06-30 23:00"   # Test 6 months
+    topology["end_date"] = "2041-03-31 23:00"   # Test 3 months
     topology["resolution"] = "1h"
 
     with open(path_model_input / "Topology.json", "w") as json_file:
@@ -228,7 +228,7 @@ def data_processing():
     pipeline["capex_defined_per_arc"] = 1       # To enable capex for individual arc
     pipeline["size_max"] = 10000                # Test
     pipeline["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    pipeline["Performance"]["loss"] = 0         # Set a default loss value
+    #pipeline["Performance"]["loss"] = 0         # Set a default loss value
     pipeline["Performance"]["bidirectional_network"] = 0   # 0:Not allow flow in both direction, 1:To allow flow in both directions
     #pipeline["Performance"]["bidirectional_network_precise"] = 1   # 1:Not allow flow in both directions at the same time
 
@@ -243,7 +243,7 @@ def data_processing():
     ship["capex_defined_per_arc"] = 1       # To enable capex for individual arc
     ship["size_max"] = 10000                # Test
     ship["size_max_defined_per_arc"] = 0    # To disable max size for individual arc, and use the global max size instead
-    ship["Performance"]["loss"] = 0         # Set a default loss value
+    #ship["Performance"]["loss"] = 0         # Set a default loss value
     ship["Performance"]["energyconsumption"]["electricity"]["cons_model"] = 1
     ship["Performance"]["energyconsumption"]["electricity"]["k_flow"] = 0.009   # Set k_flow from Roussanaly et al., 2021 (DOI: 10.3390/en14185635)
     ship["Performance"]["energyconsumption"]["electricity"]["k_flowDistance"] = 0

@@ -56,8 +56,8 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
             
 
             ##### ---- OPEX parameters -----
-            "opex_fixed_fraction": 0.02,            # Maintenance cost 2% of CAPEX (from ZEP Report, page 24)
-            "opex_var_EUR_per_t": 0,                # Neglected, because it depends on several factors (e.g., fuel type, fuel price, ship efficiency, crew) and is expected to be small. 
+            "opex_fixed_fraction": 0.05,            # 5% of CAPEX (Roussanaly et al., 2021 (DOI: 10.3390/en14185635))
+            "opex_var_EUR_per_t": 0.9,              # Only CO2 liquefaction (Roussanaly et al., 2021), still excluding several costs (e.g., fuel cost, crew). 
 
 
             ##### ---- Operational parameters -----
