@@ -252,6 +252,7 @@ with h5py.File(h5_file, "r") as f:
     raw_kmeans    = extract_datasets_from_h5group(f["k_means_specs"])
     raw_nodes     = extract_datasets_from_h5group(f["design"]["nodes"])
     raw_networks  = extract_datasets_from_h5group(f["design"]["networks"])
+    raw_tec_op    = extract_datasets_from_h5group(f["operation"]["technology_operation"])
 
 # ── Parse nodes into wide DataFrame ──────────────────────
 # Index = (period, node_name, technology, variable)
@@ -402,6 +403,7 @@ nodes_combined = pd.concat([active_nodes, inactive_nodes], ignore_index=True)
 nodes_combined["iso2"] = nodes_combined["node"].map(
     lambda n: node_iso2_map.get(str(n).strip(), "")
 )
+
 combined_node_cols = ["node","status","iso2","role","technology","existing","size","size_ccs",
                       "capex_tec","capex_ccs","capex_tot",
                       "opex_fixed_tot","opex_fixed_ccs","opex_variable",
@@ -733,8 +735,8 @@ parameters_df = _build_parameters_df(h5_file)
 # ══════════════════════════════════════════════════════════
 def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
                            networks_wide_df: pd.DataFrame,
-                           summary_raw: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build overall and per-storage CO2 capture cost summary."""
+                           summary_raw: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build overall, per-storage, per-component and per-emitter CO2 capture cost summaries."""
     # Identify storage nodes from design data
     stor_node_names = set(
         nodes_wide_df.loc[
@@ -747,6 +749,7 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     co2_inflow_per_node: dict[str, float] = {}
     with h5py.File(h5_path, "r") as fh:
         raw_eb = extract_datasets_from_h5group(fh["operation"]["energy_balance"])
+        raw_tec_op = extract_datasets_from_h5group(fh["operation"]["technology_operation"])
 
     for k, v in raw_eb.items():
         if not (isinstance(k, tuple) and len(k) == 4):
@@ -822,8 +825,14 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     total_cost = _get_summary_val("total_cost")
     emissions_net = _get_summary_val("emissions_net")
     carbon_cost = _get_summary_val("carbon_cost")
+    carbon_revenue = _get_summary_val("carbon_revenue")
     cost_capex_tecs = _get_summary_val("cost_capex_tecs")
     cost_capex_netws = _get_summary_val("cost_capex_netws")
+    cost_opex_tecs = _get_summary_val("cost_opex_tecs")
+    cost_opex_netws = _get_summary_val("cost_opex_netws")
+    cost_imports = _get_summary_val("cost_imports")
+    cost_exports = _get_summary_val("cost_exports")
+    violation_cost = _get_summary_val("violation_cost")
 
     # CAPEX annualization traceability / up-front reconstruction
     # annualized_cost = upfront_cost * annualization_factor
@@ -938,11 +947,44 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
 
     avg_cost_overall = (total_cost / total_co2_injected_annualized) if total_co2_injected_annualized > 0 else None
 
+    # Carbon-policy-excluded system cost (policy-neutral):
+    # total_cost = base_system_cost + carbon_cost - carbon_revenue
+    # => base_system_cost = total_cost - carbon_cost + carbon_revenue
+    carbon_cost_safe = carbon_cost if carbon_cost is not None else 0.0
+    carbon_revenue_safe = carbon_revenue if carbon_revenue is not None else 0.0
+    total_cost_excl_carbon = (total_cost - carbon_cost_safe + carbon_revenue_safe) if total_cost is not None else None
+    avg_capture_cost_excl_carbon = (
+        total_cost_excl_carbon / total_co2_injected_annualized
+        if (total_cost_excl_carbon is not None and total_co2_injected_annualized > 0)
+        else None
+    )
+
+    # Cross-check (if all summary components exist):
+    # base_system_cost = cost_tecs + cost_netws + cost_imports + cost_exports + violation_cost
+    can_crosscheck = all(v is not None for v in [
+        cost_capex_tecs, cost_capex_netws, cost_opex_tecs, cost_opex_netws,
+        cost_imports, cost_exports, violation_cost
+    ])
+    total_cost_excl_carbon_from_components = None
+    if can_crosscheck:
+        total_cost_excl_carbon_from_components = (
+            cost_capex_tecs + cost_capex_netws + cost_opex_tecs + cost_opex_netws
+            + cost_imports + cost_exports + violation_cost
+        )
+
     overall_rows = [
         {"metric": "total_cost",           "value": total_cost,           "unit": "€",      "note": "Total system cost (CAPEX+OPEX+imports+carbon)"},
+        {"metric": "total_cost_excl_carbon", "value": total_cost_excl_carbon, "unit": "€",    "note": "Policy-neutral system cost = total_cost - carbon_cost + carbon_revenue"},
         {"metric": "cost_capex_tecs",      "value": cost_capex_tecs,      "unit": "€",      "note": "Annualized CAPEX of technologies from summary"},
         {"metric": "cost_capex_netws",     "value": cost_capex_netws,     "unit": "€",      "note": "Annualized CAPEX of networks from summary"},
+        {"metric": "cost_opex_tecs",       "value": cost_opex_tecs,       "unit": "€",      "note": "OPEX of technologies from summary"},
+        {"metric": "cost_opex_netws",      "value": cost_opex_netws,      "unit": "€",      "note": "OPEX of networks from summary"},
+        {"metric": "cost_imports",         "value": cost_imports,         "unit": "€",      "note": "Import cost from summary"},
+        {"metric": "cost_exports",         "value": cost_exports,         "unit": "€",      "note": "Export cost from summary"},
+        {"metric": "violation_cost",       "value": violation_cost,       "unit": "€",      "note": "Energy balance violation cost from summary"},
         {"metric": "carbon_cost",          "value": carbon_cost,          "unit": "€",      "note": "Carbon cost component"},
+        {"metric": "carbon_revenue",       "value": carbon_revenue,       "unit": "€",      "note": "Carbon revenue component"},
+        {"metric": "total_cost_excl_carbon_components", "value": total_cost_excl_carbon_from_components, "unit": "€", "note": "Cross-check from components: capex+opex+imports+exports+violation (no carbon terms)"},
         {"metric": "emissions_net",        "value": emissions_net,        "unit": "t CO2",  "note": "Net system emissions"},
         {"metric": "modelled_timesteps",             "value": modelled_timesteps,            "unit": "-",      "note": "Number of timesteps represented in operation results"},
         {"metric": "hours_per_timestep",             "value": hours_per_timestep,            "unit": "h",      "note": "From Topology.json resolution (fallback=1h)"},
@@ -957,6 +999,7 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "total_CO2_injected_modelled",    "value": total_co2_injected,            "unit": "t CO2",  "note": "Sum of CO2 injected at all storage nodes over modelled horizon"},
         {"metric": "total_CO2_injected_annualized",  "value": total_co2_injected_annualized, "unit": "t CO2/y","note": "Modelled CO2 injected scaled to annual basis"},
         {"metric": "avg_capture_cost",               "value": avg_cost_overall,              "unit": "€/t CO2","note": "total_cost / total_CO2_injected_annualized"},
+        {"metric": "avg_capture_cost_excl_carbon",   "value": avg_capture_cost_excl_carbon,  "unit": "€/t CO2","note": "total_cost_excl_carbon / total_CO2_injected_annualized"},
     ]
     overall_df = pd.DataFrame(overall_rows)
 
@@ -987,9 +1030,176 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     per_stor_df = pd.DataFrame(per_stor_rows).sort_values("CO2_injected_t_annualized", ascending=False).reset_index(drop=True)
     per_stor_df.index += 1
 
-    return overall_df, per_stor_df
+    # Connected-component full-chain capture cost and emitter allocation.
+    active_transport = networks_wide_df[
+        pd.to_numeric(networks_wide_df.get("size", 0.0), errors="coerce").fillna(0.0) > 0.01
+    ].copy()
+    if not active_transport.empty:
+        for c in ["total_flow", "capex", "opex_fixed", "opex_variable"]:
+            if c in active_transport.columns:
+                active_transport[c] = pd.to_numeric(active_transport[c], errors="coerce").fillna(0.0)
 
-co2_capture_overall_df, co2_capture_per_stor_df = _build_co2_capture_df(
+    node_cost_df = (
+        nodes_wide_df.groupby("node", as_index=False)
+        .agg(
+            capex_tot=("capex_tot", "sum"),
+            opex_fixed_tot=("opex_fixed_tot", "sum"),
+            opex_variable=("opex_variable", "sum"),
+        )
+    )
+    node_cost_df["node_cost_total"] = (
+        pd.to_numeric(node_cost_df["capex_tot"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(node_cost_df["opex_fixed_tot"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(node_cost_df["opex_variable"], errors="coerce").fillna(0.0)
+    )
+    node_cost_map = dict(zip(node_cost_df["node"], node_cost_df["node_cost_total"]))
+
+    emitter_captured_modelled = {}
+    for k, v in raw_tec_op.items():
+        if not (isinstance(k, tuple) and len(k) == 4):
+            continue
+        _, node, _tec, var = k
+        if var == "CO2captured_var_output_ccs":
+            emitter_captured_modelled[node] = emitter_captured_modelled.get(node, 0.0) + float(np.array(v).sum())
+    emitter_captured_annualized = {k: v * annualization_factor for k, v in emitter_captured_modelled.items()}
+
+    emitter_transport_modelled = {}
+    if not active_transport.empty:
+        grouped_outflow = active_transport.groupby("fromNode", as_index=False)["total_flow"].sum()
+        emitter_transport_modelled = dict(zip(grouped_outflow["fromNode"], grouped_outflow["total_flow"]))
+    emitter_transport_annualized = {k: v * annualization_factor for k, v in emitter_transport_modelled.items()}
+
+    component_rows = []
+    emitter_alloc_rows = []
+    if not active_transport.empty:
+        comp_graph = nx.Graph()
+        comp_graph.add_nodes_from(set(active_transport["fromNode"]) | set(active_transport["toNode"]))
+        comp_graph.add_edges_from(active_transport[["fromNode", "toNode"]].itertuples(index=False, name=None))
+
+        for comp_id, comp_nodes in enumerate(nx.connected_components(comp_graph), start=1):
+            comp_nodes = sorted(comp_nodes)
+            comp_set = set(comp_nodes)
+            comp_arcs = active_transport[
+                active_transport["fromNode"].isin(comp_set) & active_transport["toNode"].isin(comp_set)
+            ]
+
+            comp_node_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set))
+            comp_arc_cost = float(
+                pd.to_numeric(comp_arcs.get("capex", 0.0), errors="coerce").fillna(0.0).sum()
+                + pd.to_numeric(comp_arcs.get("opex_fixed", 0.0), errors="coerce").fillna(0.0).sum()
+                + pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum()
+            )
+            comp_total_cost = comp_node_cost + comp_arc_cost
+
+            comp_injected_modelled = float(sum(stor_co2_inflow.get(n, 0.0) for n in comp_set))
+            comp_injected_annualized = comp_injected_modelled * annualization_factor
+            comp_cost_per_t = (
+                comp_total_cost / comp_injected_annualized if comp_injected_annualized > 0 else None
+            )
+
+            emitter_nodes = sorted(
+                n for n in comp_nodes if emitter_transport_annualized.get(n, 0.0) > 0
+            )
+            comp_transported_total = float(sum(emitter_transport_annualized.get(n, 0.0) for n in emitter_nodes))
+            comp_captured_total = float(sum(emitter_captured_annualized.get(n, 0.0) for n in emitter_nodes))
+
+            allocation_basis = "transported_CO2_share"
+            if comp_transported_total <= 0:
+                allocation_basis = "captured_CO2_share_fallback"
+                comp_transported_total = float(sum(emitter_captured_annualized.get(n, 0.0) for n in emitter_nodes))
+
+            component_rows.append(
+                {
+                    "component_id": comp_id,
+                    "n_nodes": len(comp_nodes),
+                    "n_arcs": len(comp_arcs),
+                    "nodes": " | ".join(comp_nodes),
+                    "node_direct_cost_EUR": comp_node_cost,
+                    "network_cost_EUR": comp_arc_cost,
+                    "full_chain_cost_EUR": comp_total_cost,
+                    "CO2_injected_t_modelled": comp_injected_modelled,
+                    "CO2_injected_t_annualized": comp_injected_annualized,
+                    "full_chain_capture_cost_EUR_per_t": comp_cost_per_t,
+                    "allocation_basis": allocation_basis,
+                }
+            )
+
+            for emitter in emitter_nodes:
+                transported_ann = float(emitter_transport_annualized.get(emitter, 0.0))
+                captured_ann = float(emitter_captured_annualized.get(emitter, 0.0))
+                numerator = transported_ann if allocation_basis == "transported_CO2_share" else captured_ann
+                share = (numerator / comp_transported_total) if comp_transported_total > 0 else None
+                allocated_cost = (comp_total_cost * share) if share is not None else None
+                allocated_per_t = (allocated_cost / transported_ann) if (allocated_cost is not None and transported_ann > 0) else None
+
+                share_transport = (transported_ann / comp_transported_total) if comp_transported_total > 0 else None
+                share_capture = (captured_ann / comp_captured_total) if comp_captured_total > 0 else None
+
+                share_blended = None
+                if (share_transport is not None) and (share_capture is not None):
+                    share_blended = 0.5 * (share_transport + share_capture)
+                elif share_transport is not None:
+                    share_blended = share_transport
+                elif share_capture is not None:
+                    share_blended = share_capture
+
+                allocated_cost_transport = (comp_total_cost * share_transport) if share_transport is not None else None
+                allocated_cost_capture = (comp_total_cost * share_capture) if share_capture is not None else None
+                allocated_cost_blended = (comp_total_cost * share_blended) if share_blended is not None else None
+
+                allocated_per_t_transport = (
+                    allocated_cost_transport / transported_ann
+                    if (allocated_cost_transport is not None and transported_ann > 0)
+                    else None
+                )
+                allocated_per_t_capture = (
+                    allocated_cost_capture / transported_ann
+                    if (allocated_cost_capture is not None and transported_ann > 0)
+                    else None
+                )
+                allocated_per_t_blended = (
+                    allocated_cost_blended / transported_ann
+                    if (allocated_cost_blended is not None and transported_ann > 0)
+                    else None
+                )
+
+                emitter_alloc_rows.append(
+                    {
+                        "component_id": comp_id,
+                        "emitter_node": emitter,
+                        "transported_CO2_t_annualized": transported_ann,
+                        "captured_CO2_t_annualized": captured_ann,
+                        "share_in_component": share,
+                        "allocated_full_chain_cost_EUR": allocated_cost,
+                        "allocated_cost_per_t_transported_EUR_per_t": allocated_per_t,
+                        "allocation_basis": allocation_basis,
+                        "share_transport": share_transport,
+                        "share_capture": share_capture,
+                        "share_blended_50_50": share_blended,
+                        "allocated_cost_transport_share_EUR": allocated_cost_transport,
+                        "allocated_cost_capture_share_EUR": allocated_cost_capture,
+                        "allocated_cost_blended_50_50_EUR": allocated_cost_blended,
+                        "allocated_cost_per_t_transport_share_EUR_per_t": allocated_per_t_transport,
+                        "allocated_cost_per_t_capture_share_EUR_per_t": allocated_per_t_capture,
+                        "allocated_cost_per_t_blended_50_50_EUR_per_t": allocated_per_t_blended,
+                    }
+                )
+
+    comp_cost_df = pd.DataFrame(component_rows)
+    if not comp_cost_df.empty:
+        comp_cost_df = comp_cost_df.sort_values("component_id").reset_index(drop=True)
+        comp_cost_df.index += 1
+
+    emitter_alloc_df = pd.DataFrame(emitter_alloc_rows)
+    if not emitter_alloc_df.empty:
+        emitter_alloc_df = emitter_alloc_df.sort_values(
+            ["component_id", "allocated_full_chain_cost_EUR"], ascending=[True, False]
+        ).reset_index(drop=True)
+        emitter_alloc_df.index += 1
+
+    return overall_df, per_stor_df, comp_cost_df, emitter_alloc_df
+
+co2_capture_overall_df, co2_capture_per_stor_df, co2_capture_per_component_df, co2_capture_emitter_alloc_df = _build_co2_capture_df(
     h5_file, nodes_wide, networks_wide, raw_summary
 )
 
@@ -1071,12 +1281,20 @@ def _write_results_excel(target_path: Path):
         components_out.to_excel(writer, sheet_name="active_components_sanity")
         print(f"  ✅ active_components_sanity: {components_out.shape}")
 
-        # CO2_capture — overall summary + per-storage breakdown
+        # CO2_capture — overall summary + per-storage + per-component + emitter allocation
         co2_capture_overall_df.to_excel(writer, sheet_name="CO2_capture", index=False, startrow=0)
-        # Write per-storage table below with a blank row gap
         gap_row = len(co2_capture_overall_df) + 3
         co2_capture_per_stor_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
-        print(f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, per_storage={co2_capture_per_stor_df.shape}")
+        gap_row += len(co2_capture_per_stor_df) + 3
+        co2_capture_per_component_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
+        gap_row += len(co2_capture_per_component_df) + 3
+        co2_capture_emitter_alloc_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
+        print(
+            f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, "
+            f"per_storage={co2_capture_per_stor_df.shape}, "
+            f"per_component={co2_capture_per_component_df.shape}, "
+            f"emitter_alloc={co2_capture_emitter_alloc_df.shape}"
+        )
 
 
 actual_output_excel = output_excel
@@ -1096,6 +1314,7 @@ print(f"\n✅ Excel saved → {actual_output_excel}")
 
 script_dir = Path(__file__).resolve().parent
 ship_route_geom = load_ship_route_geometries(script_dir)
+manual_pipeline_geom = load_manual_pipeline_geometries(script_dir)
 
 # Load coordinates
 nodes_df = pd.read_csv(node_loc_file, sep=";",
@@ -1161,6 +1380,9 @@ for _, row in all_arcs_map.iterrows():
     if row["mode"] == "CO2Ship":
         ship_key = (normalize(repair_name(fn)), normalize(repair_name(tn)))
         route_locations = ship_route_geom.get(ship_key, route_locations)
+    elif row["mode"] == "CO2_Pipeline":
+        pipe_key = (normalize(repair_name(fn)), normalize(repair_name(tn)))
+        route_locations = manual_pipeline_geom.get(pipe_key, route_locations)
 
     row_size = pd.to_numeric(row.get("size"), errors="coerce")
     row_flow = pd.to_numeric(row.get("total_flow"), errors="coerce")
