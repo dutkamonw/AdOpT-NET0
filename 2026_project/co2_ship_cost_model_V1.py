@@ -207,8 +207,8 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
             "gamma2":        conv(g2),
             "gamma3":        0.0,   # γ3=0: d fixed per arc, baked into γ1/γ2
             "gamma4":        0.0,   # γ4=0: d fixed per arc, baked into γ1/γ2
-            "opex_fixed":    o["opex_fixed_fraction"],
-            "opex_variable": conv(o["opex_var_EUR_per_t"]),
+            "OPEX_fixed":    o["opex_fixed_fraction"],
+            "OPEX_variable": conv(o["opex_var_EUR_per_t"]),
             "lifetime":      o["lifetime"],
         })
 
