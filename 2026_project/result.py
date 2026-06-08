@@ -1052,17 +1052,9 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     )
     network_cost_system = float((cost_capex_netws or 0.0) + (cost_opex_netws or 0.0))
     tec_total_system = float((cost_capex_tecs or 0.0) + (cost_opex_tecs or 0.0))
-    capture_only_cost_system = tec_total_system - storage_direct_cost_system
-    ts_cost_system = network_cost_system + storage_direct_cost_system
-    lccs_cost_excl_imports_exports = capture_only_cost_system + ts_cost_system
     import_export_net_cost_system = float((cost_imports or 0.0) + (cost_exports or 0.0))
-    total_minus_lccs = (total_cost - lccs_cost_excl_imports_exports) if total_cost is not None else None
-    lccs_share_of_total = (
-        lccs_cost_excl_imports_exports / total_cost if (total_cost is not None and total_cost != 0) else None
-    )
-    capture_only_cost_per_t = (
-        capture_only_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
-    )
+    # total_minus_lccs references lccs_mod_bu (computed in the bottom-up block below)
+    # placeholder until bottom-up block runs; will be resolved inline in overall_rows
     ts_cost_per_t = (
         ts_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     )
@@ -1086,13 +1078,57 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
             + cost_imports + cost_exports + violation_cost
         )
 
+    # ── Bottom-up annualized system cost breakdown (consistent basis) ─────────────────────────
+    # H5 design values: capex_tot and opex_fixed_tot are year_fraction-scaled (like CAPEX annualization).
+    # opex_variable is the raw modelled-period sum and needs ×annualization_factor to become annual.
+    # The summary cost_opex_tecs mixes both scales, making top-down capture/TS decomposition
+    # unreliable. Use H5 node/arc design data directly for the breakdown.
+    _all_n_capex    = float(pd.to_numeric(nodes_wide_df["capex_tot"],       errors="coerce").fillna(0).sum())
+    _all_n_opxf     = float(pd.to_numeric(nodes_wide_df["opex_fixed_tot"],  errors="coerce").fillna(0).sum())
+    _all_n_opxv_mod = float(pd.to_numeric(nodes_wide_df["opex_variable"],   errors="coerce").fillna(0).sum())
+    _stor_capex     = float(pd.to_numeric(stor_design["capex_tot"],         errors="coerce").fillna(0).sum())
+    _stor_opxf      = float(pd.to_numeric(stor_design["opex_fixed_tot"],    errors="coerce").fillna(0).sum())
+    _stor_opxv_mod  = float(pd.to_numeric(stor_design["opex_variable"],     errors="coerce").fillna(0).sum())
+    _all_a_capex    = float(pd.to_numeric(networks_wide_df["capex"],         errors="coerce").fillna(0).sum()) if not networks_wide_df.empty else 0.0
+    _all_a_opxf     = float(pd.to_numeric(networks_wide_df["opex_fixed"],    errors="coerce").fillna(0).sum()) if not networks_wide_df.empty else 0.0
+    _all_a_opxv_mod = float(pd.to_numeric(networks_wide_df["opex_variable"], errors="coerce").fillna(0).sum()) if not networks_wide_df.empty else 0.0
+
+    # Modelled-period totals (as optimizer sees them; CAPEX already year_fraction-scaled)
+    _all_nodes_cost_mod   = _all_n_capex + _all_n_opxf + _all_n_opxv_mod
+    _stor_cost_mod        = _stor_capex  + _stor_opxf  + _stor_opxv_mod
+    _netw_cost_mod        = _all_a_capex + _all_a_opxf + _all_a_opxv_mod
+    capture_only_mod_bu   = _all_nodes_cost_mod - _stor_cost_mod
+    ts_cost_mod_bu        = _stor_cost_mod + _netw_cost_mod
+    lccs_mod_bu           = capture_only_mod_bu + ts_cost_mod_bu
+
+    # Annualized (×8760/modelled_hours applied to opex_variable; CAPEX/opex_fixed unchanged)
+    _all_nodes_cost_ann   = _all_n_capex + _all_n_opxf + _all_n_opxv_mod * annualization_factor
+    # storage_direct_cost_system is already the annualized storage cost (computed above)
+    _netw_cost_ann        = _all_a_capex + _all_a_opxf + _all_a_opxv_mod * annualization_factor
+    capture_only_ann_bu   = _all_nodes_cost_ann - storage_direct_cost_system
+    ts_cost_ann_bu        = storage_direct_cost_system + _netw_cost_ann
+    lccs_ann_bu           = capture_only_ann_bu + ts_cost_ann_bu
+
+    def _per_t(cost): return cost / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
+    total_minus_lccs = (total_cost - lccs_mod_bu) if total_cost is not None else None
+
     overall_rows = [
         {"metric": "total_cost",           "value": total_cost,           "unit": "€",      "note": "Total system cost (CAPEX+OPEX+imports+carbon)"},
         {"metric": "total_cost_excl_carbon", "value": total_cost_excl_carbon, "unit": "€",    "note": "Policy-neutral system cost = total_cost - carbon_cost + carbon_revenue"},
         {"metric": "cost_capex_tecs",      "value": cost_capex_tecs,      "unit": "€",      "note": "Annualized CAPEX of technologies from summary"},
         {"metric": "cost_capex_netws",     "value": cost_capex_netws,     "unit": "€",      "note": "Annualized CAPEX of networks from summary"},
-        {"metric": "cost_opex_tecs",       "value": cost_opex_tecs,       "unit": "€",      "note": "OPEX of technologies from summary"},
-        {"metric": "cost_opex_netws",      "value": cost_opex_netws,      "unit": "€",      "note": "OPEX of networks from summary"},
+        {"metric": "cost_opex_tecs",       "value": cost_opex_tecs,       "unit": "€",      "note": "OPEX of technologies from summary (mixed scale: opex_fixed=year_fraction-scaled, opex_var=modelled-period)"},
+        {"metric": "cost_opex_netws",      "value": cost_opex_netws,      "unit": "€",      "note": "OPEX of networks from summary (same mixed scale as cost_opex_tecs)"},
+        # ── Bottom-up OPEX breakdown (nodes + networks, consistent from H5 design data) ──────
+        {"metric": "bu_opex_fixed_nodes",             "value": _all_n_opxf,                              "unit": "€",      "note": "Bottom-up: sum of opex_fixed_tot across all nodes (already year_fraction-scaled in H5)"},
+        {"metric": "bu_opex_fixed_networks",          "value": _all_a_opxf,                              "unit": "€",      "note": "Bottom-up: sum of opex_fixed across all network arcs (already year_fraction-scaled in H5)"},
+        {"metric": "bu_opex_fixed_total",             "value": _all_n_opxf + _all_a_opxf,                "unit": "€",      "note": "bu_opex_fixed_nodes + bu_opex_fixed_networks"},
+        {"metric": "bu_opex_variable_nodes_modelled", "value": _all_n_opxv_mod,                          "unit": "€",      "note": "Bottom-up: sum of opex_variable across all nodes — RAW modelled-period total (not annualized)"},
+        {"metric": "bu_opex_variable_nodes_annualized","value": _all_n_opxv_mod * annualization_factor,  "unit": "€/y",    "note": "bu_opex_variable_nodes_modelled × annualization_factor"},
+        {"metric": "bu_opex_variable_networks_modelled","value": _all_a_opxv_mod,                        "unit": "€",      "note": "Bottom-up: sum of opex_variable across all network arcs — RAW modelled-period total"},
+        {"metric": "bu_opex_variable_networks_annualized","value": _all_a_opxv_mod * annualization_factor,"unit": "€/y",   "note": "bu_opex_variable_networks_modelled × annualization_factor"},
+        {"metric": "bu_opex_variable_total_modelled", "value": _all_n_opxv_mod + _all_a_opxv_mod,        "unit": "€",      "note": "Total OPEX_variable (nodes + networks) over modelled period"},
+        {"metric": "bu_opex_variable_total_annualized","value": (_all_n_opxv_mod + _all_a_opxv_mod) * annualization_factor, "unit": "€/y", "note": "Total OPEX_variable (nodes + networks) annualized"},
         {"metric": "cost_imports",         "value": cost_imports,         "unit": "€",      "note": "Import cost from summary"},
         {"metric": "cost_exports",         "value": cost_exports,         "unit": "€",      "note": "Export cost from summary"},
         {"metric": "violation_cost",       "value": violation_cost,       "unit": "€",      "note": "Energy balance violation cost from summary"},
@@ -1114,16 +1150,23 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "total_CO2_injected_annualized",  "value": total_co2_injected_annualized, "unit": "t CO2/y","note": "Modelled CO2 injected scaled to annual basis"},
         {"metric": "avg_capture_cost",               "value": avg_cost_overall,              "unit": "€/t CO2","note": "total_cost / total_CO2_injected_annualized"},
         {"metric": "avg_capture_cost_excl_carbon",   "value": avg_capture_cost_excl_carbon,  "unit": "€/t CO2","note": "total_cost_excl_carbon / total_CO2_injected_annualized"},
-        {"metric": "capture_only_cost_system",       "value": capture_only_cost_system,      "unit": "€",      "note": "Capture-only system cost (technology costs excluding storage technologies)"},
-        {"metric": "capture_only_cost_system_per_t_annualized", "value": capture_only_cost_per_t,       "unit": "€/t CO2","note": "Annualized: capture_only_cost_system / total_CO2_injected_annualized"},
-        {"metric": "TS_cost_system",                 "value": ts_cost_system,                "unit": "€",      "note": "Transport and storage system cost (network costs + storage technologies)"},
-        {"metric": "TS_cost_system_per_t_annualized",           "value": ts_cost_per_t,                 "unit": "€/t CO2","note": "Annualized: TS_cost_system / total_CO2_injected_annualized"},
-        {"metric": "LCCS_cost_excl_imports_exports", "value": lccs_cost_excl_imports_exports, "unit": "€",      "note": "Capture + T&S only (excludes imports/exports, carbon, and violation terms)"},
-        {"metric": "LCCS_cost_per_t_excl_imports_exports_annualized", "value": lccs_cost_per_t_excl_imports_exports, "unit": "€/t CO2", "note": "Annualized: LCCS_cost_excl_imports_exports / total_CO2_injected_annualized"},
+        # ── Capture-only / T&S / LCCS breakdown — bottom-up from H5 node+arc design data ──────
+        # "modelled_period" = sum over the modelled period as seen by optimizer (CAPEX year_fraction-scaled, OPEX_var raw)
+        # "annualized"      = same but OPEX_variable scaled up to annual basis (×8760/modelled_hours)
+        {"metric": "capture_only_cost_modelled_period",    "value": capture_only_mod_bu,       "unit": "€",      "note": "Bottom-up: all non-storage node costs over modelled period (CAPEX+OPEX_fixed year_fraction-scaled; OPEX_var raw)"},
+        {"metric": "capture_only_cost_annualized",         "value": capture_only_ann_bu,       "unit": "€/y",    "note": "Bottom-up annualized: OPEX_variable scaled to annual basis"},
+        {"metric": "capture_only_cost_per_t_annualized",   "value": _per_t(capture_only_ann_bu),"unit": "€/t CO2","note": "capture_only_cost_annualized / total_CO2_injected_annualized"},
+        {"metric": "TS_cost_modelled_period",              "value": ts_cost_mod_bu,            "unit": "€",      "note": "Bottom-up: storage node costs + network arc costs over modelled period"},
+        {"metric": "TS_cost_annualized",                   "value": ts_cost_ann_bu,            "unit": "€/y",    "note": "Bottom-up annualized: storage + network costs"},
+        {"metric": "TS_cost_per_t_annualized",             "value": _per_t(ts_cost_ann_bu),    "unit": "€/t CO2","note": "TS_cost_annualized / total_CO2_injected_annualized"},
+        {"metric": "LCCS_modelled_period",                 "value": lccs_mod_bu,               "unit": "€",      "note": "Bottom-up: capture + T&S costs over modelled period (excludes imports/exports/carbon)"},
+        {"metric": "LCCS_annualized",                      "value": lccs_ann_bu,               "unit": "€/y",    "note": "Bottom-up annualized LCCS"},
+        {"metric": "LCCS_per_t_annualized",                "value": _per_t(lccs_ann_bu),       "unit": "€/t CO2","note": "LCCS_annualized / total_CO2_injected_annualized"},
         {"metric": "import_export_net_cost_system",  "value": import_export_net_cost_system, "unit": "€",      "note": "cost_imports + cost_exports from summary"},
         {"metric": "import_export_net_cost_per_t_annualized", "value": import_export_net_cost_per_t, "unit": "€/t CO2", "note": "Annualized: (cost_imports + cost_exports) / total_CO2_injected_annualized"},
-        {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "Residual vs LCCS (mostly imports/exports and policy/slack terms)"},
-        {"metric": "LCCS_share_of_total_cost",       "value": lccs_share_of_total,           "unit": "-",      "note": "LCCS_cost_excl_imports_exports / total_cost"},
+        {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "total_cost - LCCS_modelled_period (residual = imports/exports/carbon/violation)"},
+        {"metric": "LCCS_share_of_total_cost",       "value": (lccs_mod_bu / total_cost if (total_cost is not None and total_cost != 0) else None), "unit": "-", "note": "LCCS_modelled_period / total_cost"},
+        # full_chain is appended after comp_cost_df is built (see below)
     ]
     overall_df = pd.DataFrame(overall_rows)
 
@@ -1181,6 +1224,10 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         + pd.to_numeric(node_cost_df["opex_variable"], errors="coerce").fillna(0.0) * annualization_factor
     )
     node_cost_map = dict(zip(node_cost_df["node"], node_cost_df["node_cost_total"]))
+    # Separate breakdown maps for CAPEX / OPEX_fixed / OPEX_variable (annualized)
+    node_capex_map      = dict(zip(node_cost_df["node"], pd.to_numeric(node_cost_df["capex_tot"],      errors="coerce").fillna(0.0)))
+    node_opex_fixed_map = dict(zip(node_cost_df["node"], pd.to_numeric(node_cost_df["opex_fixed_tot"], errors="coerce").fillna(0.0)))
+    node_opex_var_map   = dict(zip(node_cost_df["node"], pd.to_numeric(node_cost_df["opex_variable"],  errors="coerce").fillna(0.0) * annualization_factor))
 
     emitter_captured_modelled = {}
     for k, v in raw_tec_op.items():
@@ -1213,12 +1260,15 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
 
             comp_node_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set))
             comp_storage_cost = float(sum(node_cost_map.get(n, 0.0) for n in comp_set if n in stor_node_names))
-            # capex and opex_fixed for arcs are annualized in H5 design output; opex_variable is modelled-period total
-            comp_arc_cost = float(
-                pd.to_numeric(comp_arcs.get("capex", 0.0), errors="coerce").fillna(0.0).sum()
-                + pd.to_numeric(comp_arcs.get("opex_fixed", 0.0), errors="coerce").fillna(0.0).sum()
-                + pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum() * annualization_factor
-            )
+            # Node-level OPEX breakdown (annualized)
+            comp_node_capex       = float(sum(node_capex_map.get(n, 0.0)      for n in comp_set))
+            comp_node_opex_fixed  = float(sum(node_opex_fixed_map.get(n, 0.0) for n in comp_set))
+            comp_node_opex_var    = float(sum(node_opex_var_map.get(n, 0.0)   for n in comp_set))
+            # Arc-level OPEX breakdown (capex/opex_fixed annualized in H5; opex_variable scaled here)
+            comp_arc_capex      = float(pd.to_numeric(comp_arcs.get("capex",      0.0), errors="coerce").fillna(0.0).sum())
+            comp_arc_opex_fixed = float(pd.to_numeric(comp_arcs.get("opex_fixed", 0.0), errors="coerce").fillna(0.0).sum())
+            comp_arc_opex_var   = float(pd.to_numeric(comp_arcs.get("opex_variable", 0.0), errors="coerce").fillna(0.0).sum() * annualization_factor)
+            comp_arc_cost = comp_arc_capex + comp_arc_opex_fixed + comp_arc_opex_var
             comp_total_cost = comp_node_cost + comp_arc_cost
             comp_capture_only_cost = comp_node_cost - comp_storage_cost
             comp_ts_cost = comp_storage_cost + comp_arc_cost
@@ -1247,9 +1297,15 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
                     "n_arcs": len(comp_arcs),
                     "nodes": " | ".join(comp_nodes),
                     "node_direct_cost_EUR": comp_node_cost,
+                    "node_capex_EUR": comp_node_capex,
+                    "node_opex_fixed_EUR": comp_node_opex_fixed,
+                    "node_opex_variable_EUR_annualized": comp_node_opex_var,
                     "capture_only_cost_EUR": comp_capture_only_cost,
                     "TS_cost_EUR": comp_ts_cost,
                     "network_cost_EUR": comp_arc_cost,
+                    "netw_capex_EUR": comp_arc_capex,
+                    "netw_opex_fixed_EUR": comp_arc_opex_fixed,
+                    "netw_opex_variable_EUR_annualized": comp_arc_opex_var,
                     "full_chain_cost_EUR": comp_total_cost,
                     "CO2_injected_t_modelled": comp_injected_modelled,
                     "CO2_injected_t_annualized": comp_injected_annualized,
@@ -1330,6 +1386,26 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         comp_cost_df = comp_cost_df.sort_values("component_id").reset_index(drop=True)
         comp_cost_df.index += 1
 
+    # Append full-chain totals (bottom-up sum across all components) to the metrics table
+    if not comp_cost_df.empty:
+        full_chain_total = float(comp_cost_df["full_chain_cost_EUR"].sum())
+        full_chain_total_per_t = (
+            full_chain_total / total_co2_injected_annualized
+            if total_co2_injected_annualized > 0 else None
+        )
+    else:
+        full_chain_total, full_chain_total_per_t = None, None
+    overall_df = pd.concat([overall_df, pd.DataFrame([
+        {"metric": "full_chain_cost_total_EUR_annualized",
+         "value": full_chain_total,
+         "unit": "€/y",
+         "note": "Bottom-up annualized: sum of full_chain_cost_EUR across all connected components; includes only nodes+arcs in active network (cross-check vs LCCS_annualized)"},
+        {"metric": "full_chain_cost_total_per_t_annualized",
+         "value": full_chain_total_per_t,
+         "unit": "€/t CO2",
+         "note": "full_chain_cost_total_EUR_annualized / total_CO2_injected_annualized"},
+    ])], ignore_index=True)
+
     emitter_alloc_df = pd.DataFrame(emitter_alloc_rows)
     if not emitter_alloc_df.empty:
         emitter_alloc_df = emitter_alloc_df.sort_values(
@@ -1405,7 +1481,7 @@ try:
         _stor_json_params[_nn2] = {
             "size_max_t":             _jd.get("size_max"),
             "injection_rate_max_tph": _jd.get("Flexibility", {}).get("injection_rate_max"),
-            "opex_var_EUR_per_t":     _jd.get("OPEX_variable"),
+            "opex_var_EUR_per_t":     _jd.get("Economics", {}).get("OPEX_variable"),
         }
 except Exception as _e2:
     print(f"[WARN] Could not read storage JSONs for utilization sheet: {_e2}")
