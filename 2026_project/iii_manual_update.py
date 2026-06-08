@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import duckdb
 from pathlib import Path
-from user_defined_function import canonicalize_name, create_matrix, create_gamma_matrix
+from user_defined_function import canonicalize_name, create_gamma_matrix_v2, create_matrix, create_gamma_matrix
 
 ##################################################################################################
 
@@ -125,7 +125,7 @@ def manual_update():
 
 
     # ---- Create gamma matrix for Ship ----
-    create_gamma_matrix(
+    create_gamma_matrix_v2(
         cost_model_type    = "ship",
         table_name         ="combined_selected_final",  # new table (to get emission data)
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
@@ -159,7 +159,7 @@ def manual_update():
 
    
     # ---- Create gamma matrix for pipeline ----
-    create_gamma_matrix(
+    create_gamma_matrix_v2(
         cost_model_type    = "pipeline",
         table_name         ="combined_selected_final",  # new table (to get emission data)
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline" / "distance.csv",
