@@ -1053,14 +1053,6 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     network_cost_system = float((cost_capex_netws or 0.0) + (cost_opex_netws or 0.0))
     tec_total_system = float((cost_capex_tecs or 0.0) + (cost_opex_tecs or 0.0))
     import_export_net_cost_system = float((cost_imports or 0.0) + (cost_exports or 0.0))
-    # total_minus_lccs references lccs_mod_bu (computed in the bottom-up block below)
-    # placeholder until bottom-up block runs; will be resolved inline in overall_rows
-    ts_cost_per_t = (
-        ts_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
-    )
-    lccs_cost_per_t_excl_imports_exports = (
-        lccs_cost_excl_imports_exports / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
-    )
     import_export_net_cost_per_t = (
         import_export_net_cost_system / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     )
