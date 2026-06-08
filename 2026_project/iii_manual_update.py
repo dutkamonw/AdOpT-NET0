@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import duckdb
 from pathlib import Path
-from user_defined_function import canonicalize_name, create_gamma_matrix_v2, create_matrix, create_gamma_matrix
+from user_defined_function import canonicalize_name, create_gamma_matrix_v2, create_matrix
 
 ##################################################################################################
 

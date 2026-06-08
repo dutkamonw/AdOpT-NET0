@@ -128,7 +128,7 @@ def data_processing():
 
 
     # ---- Create gamma matrix for Ship ----
-    create_gamma_matrix(
+    create_gamma_matrix_v2(
         cost_model_type    = "ship",
         table_name         ="combined_selected",  # To get emission data for massflow bounds
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
