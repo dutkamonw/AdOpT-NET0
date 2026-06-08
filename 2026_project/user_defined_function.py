@@ -1230,7 +1230,18 @@ def create_gamma_matrix_v1(
 
             gamma_matrices["gamma1"].at[node_from, node_to] = model.financial_indicators["gamma1"]
             gamma_matrices["gamma2"].at[node_from, node_to] = model.financial_indicators["gamma2"]
-            # gamma3 & gamma4 remain 0.0
+            
+            # Pipeline distance-dependent OPEX: 13,000 EUR/km/year (from Ravenna case in Report: Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic and regulatory aspects functional to the development of the CCUS supply chain], 2025).
+            # AdOpT-NET0 multiplies all gamma values by annualization_factor before passing them to the optimizer. So gamma3 must be supplied as an upfront-equivalent
+
+            if cost_model_type == "pipeline":
+                _r = discount_rate
+                _L = model.json_data["Economics"]["lifetime"]  # read directly from CO2_Pipeline.json
+                _af = _r * (1 + _r) ** _L / ((1 + _r) ** _L - 1)
+                _opex_per_km_per_yr = 13_000  # EUR/km/year
+                gamma_matrices["gamma3"].at[node_from, node_to] = (_opex_per_km_per_yr / _af) * dist
+            
+            # gamma4 remains 0.0
 
     # 7. Export CSVs
     output_path = Path(output_path)
