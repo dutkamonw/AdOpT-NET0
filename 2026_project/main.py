@@ -82,27 +82,30 @@ run_model = False # Step 13) run the optimization model
 
 SCENARIO = "Base"
 
+# Injection rate is fixed at the Base mid-case rate for all scenarios.
+# Only OPEX_variable (levelised storage cost) differs between scenarios.
+# Varying injection rate would change physical storage throughput and risk infeasibility
+# for Conservative (lower rate) — keeping it fixed makes scenarios directly comparable.
+INJECTION_RATE_PCT_PER_YEAR = 0.04   # fixed at 4 % of geological capacity per year (Base mid-case)
+
 SCENARIO_CONFIG = {
     "Conservative": {
         "label":                       "Conservative_EarlyPhase",
-        "injection_rate_pct_per_year": 0.02,    # 2 % of total capacity per year
         "opex_var_storage_EUR_per_t":  75.8,
     },
     "Base": {
         "label":                       "Base_MidPhase",
-        "injection_rate_pct_per_year": 0.04,    # 4 % of total capacity per year
         "opex_var_storage_EUR_per_t":  50.6,
     },
     "Optimistic": {
         "label":                       "Optimistic_MaturePhase",
-        "injection_rate_pct_per_year": 0.06,    # 6 % of total capacity per year
         "opex_var_storage_EUR_per_t":  42.5,
     },
 }
 _sc = SCENARIO_CONFIG[SCENARIO]
 
 print(f"SCENARIO: {SCENARIO}  ({_sc['label']})")
-print(f"  injection_rate_pct/yr : {_sc['injection_rate_pct_per_year']*100:.0f} %")
+print(f"  injection_rate_pct/yr : {INJECTION_RATE_PCT_PER_YEAR*100:.0f} % (fixed, same for all scenarios)")
 print(f"  OPEX_var storage      : {_sc['opex_var_storage_EUR_per_t']} EUR/t")
 print(f"{'='*60}\n")
 
@@ -413,8 +416,8 @@ if prepare_inputs:
             capacity = float(row['capacity_T'])
             node_name = str(row['node_name'])
 
-            # Injection rate = scenario fraction of geological capacity (t/h)
-            injection_rate = capacity * _sc["injection_rate_pct_per_year"] / 8760
+            # Injection rate = fixed fraction of geological capacity (t/h), same across all scenarios
+            injection_rate = capacity * INJECTION_RATE_PCT_PER_YEAR / 8760
 
             # size_max caps injectable CO2 over the modelled horizon (physically achievable upper bound).
             # Uses fraction_of_year_modelled so it updates automatically when Topology dates change.
@@ -429,7 +432,7 @@ if prepare_inputs:
                 data["size_max"] = round(size_max, 2)
                 data["Flexibility"]["injection_rate_max"] = round(injection_rate, 4)
                 # Set levelised storage cost for this scenario (amortised CAPEX + OPEX per tCO2)
-                data["OPEX_variable"] = _sc["opex_var_storage_EUR_per_t"]
+                data["Economics"]["OPEX_variable"] = _sc["opex_var_storage_EUR_per_t"]
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
 
