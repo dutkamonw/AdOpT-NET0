@@ -41,6 +41,7 @@ from user_defined_function import (
     copy_network_data_from_db,
     create_emitter_technology,
 )
+from co2_ship_cost_model_V1 import CO2_Ship_Dedicated_CostModel as _ShipModel
 
 
 ##################################################################################################
@@ -249,7 +250,17 @@ def data_processing():
     ship["Performance"]["energyconsumption"]["electricity"]["k_flowDistance"] = 0
     for key in ["p", "c", "T", "eta", "gam", "LHV"]:
         ship["Performance"]["energyconsumption"]["electricity"].pop(key, None)
-    
+
+    # Write Economics scalars (OPEX_fixed, OPEX_variable, lifetime, discount_rate) from the
+    # cost model defaults.  These are arc-invariant and are NOT written by create_gamma_matrix
+    # (which only produces the per-arc gamma CSVs).  Without this update the template value
+    # OPEX_fixed = 0 flows straight into the optimizer.
+    _ship_defaults = _ShipModel().default_options
+    ship["Economics"]["OPEX_fixed"]    = _ship_defaults["opex_fixed_fraction"]
+    ship["Economics"]["OPEX_variable"] = _ship_defaults["opex_var_EUR_per_t"]
+    ship["Economics"]["lifetime"]      = _ship_defaults["lifetime"]
+    ship["Economics"]["discount_rate"] = _ship_defaults["discount_rate"]
+
     with open(output_path / "CO2Ship.json", "w") as json_file:
         json.dump(ship, json_file, indent=4)
 
@@ -262,7 +273,7 @@ def data_processing():
     # Run function
     create_emitter_technology(input_path_excel, output_path)
 
-    # Normalize Economics keys in the generated emitter files so they match adopt_net0 expectations.
+    # Normalize Economics keys in the generated emitter files so they match adopt_net0 expectations (e.g., "capex_model" to "CAPEX_model", "opex_fixed" to "OPEX_fixed", etc.)
     for emitter_file in output_path.glob("emitter_*.json"):
         with open(emitter_file, "r") as json_file:
             emitter_data = json.load(json_file)
