@@ -811,6 +811,26 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
         except Exception as e:
             _add_row(f"{net_name}", str(e), "", "Error loading", f"{net_name}.json")
 
+    # ── Scenario configuration ────────────────────────────
+    _add_row("scenario.name",   SCENARIO,                                  "-",       "Active scenario name (Conservative / Base / Optimistic)", "result.py SCENARIO")
+    _add_row("scenario.label",  _sc_result["label"],                       "-",       "Descriptive label for this scenario",                      "result.py SCENARIO_CONFIG")
+    _add_row("scenario.storage_OPEX_variable", _sc_result["opex_var_storage_EUR_per_t"], "€/t CO2", "Levelised storage cost used for PermanentStorage_CO2_simple OPEX_variable", "result.py SCENARIO_CONFIG")
+    # Read injection rate directly from the first storage JSON found (written by main.py step 11)
+    try:
+        _stor_jsons = sorted(
+            (h5_file_path.parent.parent.parent / "3_model_inputs" / "period1" / "node_data")
+            .glob("*/technology_data/PermanentStorage_CO2_simple.json")
+        )
+        if _stor_jsons:
+            with open(_stor_jsons[0]) as _fh_s:
+                _stor_j = json.load(_fh_s)
+            _inj_max = _stor_j.get("Flexibility", {}).get("injection_rate_max", "N/A")
+            _add_row("scenario.injection_rate_max_example", _inj_max, "t/h",
+                     f"injection_rate_max from first storage node ({_stor_jsons[0].parts[-3]})",
+                     "PermanentStorage_CO2_simple.json")
+    except Exception:
+        pass
+
     return pd.DataFrame(rows)[["parameter", "value", "unit", "description", "source"]]
 
 parameters_df = _build_parameters_df(h5_file)
@@ -1387,6 +1407,18 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         )
     else:
         full_chain_total, full_chain_total_per_t = None, None
+
+    # imports/exports from summary are raw modelled-period totals → annualize before adding
+    imports_ann = (cost_imports or 0.0) * annualization_factor
+    exports_ann = (cost_exports or 0.0) * annualization_factor
+    full_chain_incl_imports = (
+        (full_chain_total + imports_ann + exports_ann) if full_chain_total is not None else None
+    )
+    full_chain_incl_imports_per_t = (
+        full_chain_incl_imports / total_co2_injected_annualized
+        if (full_chain_incl_imports is not None and total_co2_injected_annualized > 0) else None
+    )
+
     overall_df = pd.concat([overall_df, pd.DataFrame([
         {"metric": "full_chain_cost_total_EUR_annualized",
          "value": full_chain_total,
@@ -1396,6 +1428,14 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
          "value": full_chain_total_per_t,
          "unit": "€/t CO2",
          "note": "full_chain_cost_total_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "full_chain_incl_imports_EUR_annualized",
+         "value": full_chain_incl_imports,
+         "unit": "€/y",
+         "note": "full_chain_cost_total + (cost_imports + cost_exports) × annualization_factor; raw import/export costs from summary annualized to match node+arc costs"},
+        {"metric": "full_chain_incl_imports_per_t_annualized",
+         "value": full_chain_incl_imports_per_t,
+         "unit": "€/t CO2",
+         "note": "full_chain_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
     ])], ignore_index=True)
 
     emitter_alloc_df = pd.DataFrame(emitter_alloc_rows)
