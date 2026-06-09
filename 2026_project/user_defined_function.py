@@ -53,7 +53,7 @@ import unicodedata
 
 import networkx as nx
 from adopt_net0.database.components.networks import CO2_Pipeline_CostModel
-from co2_ship_cost_model_V1 import CO2_Ship_Dedicated_CostModel
+from co2_ship_cost_model import CO2_Ship_Dedicated_CostModel
 
 
 

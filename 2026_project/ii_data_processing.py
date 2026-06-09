@@ -35,7 +35,7 @@ if str(project_root) not in sys.path:
 
 from user_defined_function import (
     canonicalize_name,
-    create_gamma_matrix_v2,
+    create_gamma_matrix_v3,
     create_matrix,
     copy_technology_from_db,
     copy_network_data_from_db,
@@ -88,7 +88,7 @@ def data_processing():
     print("---------------------")
 
     # ---- Create gamma matrix for pipeline ----
-    create_gamma_matrix_v2(
+    create_gamma_matrix_v3(
         cost_model_type    = "pipeline",
         table_name         ="combined_selected",  # To get emission data 
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2_Pipeline" / "distance.csv",
@@ -128,7 +128,7 @@ def data_processing():
 
 
     # ---- Create gamma matrix for Ship ----
-    create_gamma_matrix_v2(
+    create_gamma_matrix_v3(
         cost_model_type    = "ship",
         table_name         ="combined_selected",  # To get emission data for massflow bounds
         distance_matrix    = output_path_data_processed / "network_topology_prep" / "CO2Ship" / "distance.csv",
@@ -232,7 +232,7 @@ def data_processing():
     #pipeline["Performance"]["loss"] = 0         # Set a default loss value
     pipeline["Performance"]["bidirectional_network"] = 0   # 0:Not allow flow in both direction, 1:To allow flow in both directions
     #pipeline["Performance"]["bidirectional_network_precise"] = 1   # 1:Not allow flow in both directions at the same time
-
+    pipeline["Economics"]["OPEX_fixed"] = 0.04   # From Oeuvray et al. (2024) O&M Pipeline cost
 
     with open(output_path / "CO2_Pipeline.json", "w") as json_file:
         json.dump(pipeline, json_file, indent=4)

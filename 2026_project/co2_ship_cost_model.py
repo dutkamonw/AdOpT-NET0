@@ -46,14 +46,18 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
 
             ##### ---- Ship parameters ----
             ##  From 2025 Norther Light Annual Report    
+            "ship_capacity_m3": 7500,               # Northern Pioneer Capacity (m3)
             "ship_capacity_t": 7004.21,             # Northern Pioneer Capacity (7500 m3) * LCO2 density (-35 degC, 19 bar --> 1098.7 kg/m3 from NIST) * Utilization factor (0.85) (Footnote Table A.1)                      
-            "c_ship_EUR_per_ship": 56_197_670,      # Cost per ship (EUR/ship), fixed capacity from Northern Pioneer (2025 Northern Light Annual Report)
-            "c_land_EUR": 4_018_490,                # Cost of intermediate (buffer) storage + loading station (EUR), fixed capacity from Northern Light site's land facilities and infrastructure (2025 Northern Light Annual Report)
+            "I_c_EUR": 56_197_670,                  # Cost per carrier (EUR/carrier) : Norther Light project reported two ships, so *0.5 for one ship
+            ### From Roussanaly et al., 2021 (DOI: 10.3390/en14185635)
+            "c_st_EUR_per_m3": 976,                 # Cost of intermediate storage (EUR/m3) : Roussanaly et al. gave min-max range of 550-920 EUR_2017/m3, so converting to EUR_2025/m3 and take the average
+            "c_l_EUR_per_t": 3.5,                   # Cost of loading (EUR/t) : Roussanaly et al. gave 7,900,000 EUR_2017 for 3 MTPA, so converting to EUR_2025 and dividing by 3 MTPA gives 3.5 EUR_2025/t
+            "c_liq_EUR_per_t": 1.7,                 # Liquefaction plant CAPEX (EUR/t) : Roussanaly et al. 2021 Table 3, 1.3 EUR_2017/t for inland emitter at 15 barg (costs of liquefying 1 MtCO2/year), converted to EUR_2025/t
             
 
             ##### ---- OPEX parameters -----
-            "opex_fixed_fraction": 0.02,            # Maintenance cost 2% of CAPEX (from ZEP Report, page 24)
-            "opex_var_EUR_per_t": 0,                # Neglected, because it depends on several factors (e.g., fuel type, fuel price, ship efficiency, crew) and is expected to be small. 
+            "opex_fixed_fraction": 0.05,            # 5% of CAPEX (Roussanaly et al., 2021 (DOI: 10.3390/en14185635))
+            "opex_var_EUR_per_t": 0.9,              # Only CO2 liquefaction (Roussanaly et al., 2021), still excluding several costs (e.g., fuel cost, crew). 
 
 
             ##### ---- Operational parameters -----
@@ -97,27 +101,47 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
         Returns total CAPEX in EUR 2025.
 
         CAPEX components:
-        Cost of land facilities are sum of 1+2 (c_land_EUR):
-        1. Intermediate storage
-        2. Loading station
-        
-        Cost of ship (c_ship_EUR_per_ship) is calculated as:
+        1. Intermediate storage = Capacity (t) * Cost_of_intermediate_storage (EUR/t)  (Equation 8)
+        2. Loading station =  Mass_flow_CO2_transport (t/year) * Cost_of_loading (EUR/t) / CRF (Equation 10)
         3. Carrier = Number_of_carriers * Cost per carrier (EUR/carrier)  (Equation 11)
         
+        This is an additional from Oeuvray et al. (2024) where considered only transport cost, but this study considers the full chain, so adding cost of liquefaction plant based on Roussanaly et al. (2021):
+        4. Liquefaction plant at sending port = unit cost (EUR/t) * installed capacity (t)
+        
+        Parameters:
+        - c_st_EUR_per_m3: Cost of intermediate storage (EUR/m3)
+        - c_l_EUR_per_t: Cost of loading (EUR/t)
+        - I_c_EUR: Cost per carrier (EUR/carrier)
+        - c_liq_EUR_per_t: Cost of liquefaction plant (EUR/t)
 
         """
 
         # Unpack options for easier access
         o = self.options
+        crf = self._crf()
+
+        #########  CAPEX from Equation 8, 10, 11 in Oeuvray et al. (2024) #########
+        
+        ### 1. Intermediate storage = Capacity (t) * Cost_of_intermediate_storage (EUR/t)  (Equation 8)
+        #capex_storage = o["c_st_EUR_per_t"] * o["ship_capacity_t"]
+        capex_storage = o["c_st_EUR_per_m3"] * o["ship_capacity_m3"]  # Using m3 as per Roussanaly et al. (2021)
+
+        ### 2. Loading station =  Mass_flow_CO2_transport (t/year) * Cost_of_loading (EUR/t) / CRF (Equation 10)
+        capex_loading = o["c_l_EUR_per_t"] * emission_tpa / crf
 
         ### 3. Carrier = Number_of_carriers * Cost per carrier (EUR/carrier)  (Equation 11)
         n_shipments = emission_tpa / o["ship_capacity_t"]       # Number of shipments per year (Equation 2 in Oeuvray et al. (2024))
         round_trip_h = (2 * distance_km / o["ship_speed_km_per_h"]) + o["port_time_h"]  # Round trip duration (hours)
         n_carriers = n_shipments * round_trip_h / o["operating_hours_per_a"]    # Number of carriers (Equation 3 in Oeuvray et al. (2024))
-        capex_carrier = o["c_ship_EUR_per_ship"] * n_carriers
+        capex_carrier = o["I_c_EUR"] * n_carriers
 
-        # Total CAPEX = Intermediate storage + Loading station + Ship = 1 + 2 + 3
-        capex = o["c_land_EUR"] + capex_carrier
+        ### 4. Liquefaction plant at sending port
+        #   c_liq_EUR_per_t is an annualised capital charge (EUR/t), same convention as c_l_EUR_per_t (loading station).
+        #   Dividing by CRF recovers the upfront CAPEX, consistent with Roussanaly et al. (2021) cost reporting style.
+        capex_liquefaction = o["c_liq_EUR_per_t"] * emission_tpa / crf
+
+        # Total CAPEX = 1 + 2 + 3 + 4
+        capex = capex_storage + capex_loading + capex_carrier + capex_liquefaction
 
         return capex
 
@@ -183,8 +207,8 @@ class CO2_Ship_Dedicated_CostModel(DataComponent_CostModel):
             "gamma2":        conv(g2),
             "gamma3":        0.0,   # γ3=0: d fixed per arc, baked into γ1/γ2
             "gamma4":        0.0,   # γ4=0: d fixed per arc, baked into γ1/γ2
-            "opex_fixed":    o["opex_fixed_fraction"],
-            "opex_variable": conv(o["opex_var_EUR_per_t"]),
+            "OPEX_fixed":    o["opex_fixed_fraction"],
+            "OPEX_variable": conv(o["opex_var_EUR_per_t"]),
             "lifetime":      o["lifetime"],
         })
 
