@@ -1430,6 +1430,178 @@ def create_gamma_matrix_v2(
     return gamma_matrices
 
 
+# Version 3: Same as v2 but set gamma3 to 0
+
+def create_gamma_matrix_v3(
+    cost_model_type:    str,       # "pipeline" or "ship"
+    table_name:         str,       # database table for emission data
+    distance_matrix:    Path,      # For pipeline or ship
+    discount_rate:      float,
+    financial_year_out: int,
+    output_path:        Path,
+):
+    """
+    Compute per-arc gamma matrices for CO2_Pipeline or CO2_Ship.
+
+    Pipeline arcs : connection_matrix == 1
+    Ship arcs     : distance_matrix > 0  (port-to-port only)
+
+    Massflow bounds (both modes):
+      Derived from connected components in connection_matrix (CO2_Pipeline/connection.csv).
+      For pipeline → bounds apply to each emitter-containing component.
+      For ship     → bounds apply to the port's component
+                     (emitters feeding into that port on land).
+                     max_flow = sum(emitter emissions in component) → drives n_shipments.
+    """
+
+    # Ensure conversion year exists in PPI dataset to avoid NaN currency conversion.
+    financial_year_out_resolved = _resolve_financial_year_for_inflation(financial_year_out)
+
+    # 1. Load emitters
+    with duckdb.connect(DB_PATH) as con:
+        emitters = con.execute(f"""
+            SELECT name_sanitized, emission_TPH
+            FROM {table_name}
+            WHERE type = 'emitter'
+        """).fetchdf()
+    emitters["emission_TPH"] = pd.to_numeric(emitters["emission_TPH"], errors="coerce")
+    emitters = emitters[emitters["emission_TPH"] > 0].dropna(subset=["emission_TPH"])
+    emission_dict = dict(zip(emitters["name_sanitized"], emitters["emission_TPH"]))
+
+    # 2. Load distance matrix (pipeline or ship)
+    df_dist = pd.read_csv(Path(distance_matrix), index_col=0, sep=";")
+    df_dist.index   = df_dist.index.astype(str)
+    df_dist.columns = df_dist.columns.astype(str)
+    nodes = df_dist.index.tolist()
+
+    # 3. Load connection matrix (always CO2_Pipeline/connection.csv)
+    df_conn = pd.read_csv(Path(__file__).parent / "2_data_processed" / "network_topology_prep" / "CO2_Pipeline" / "connection.csv", index_col=0, sep=";")
+    df_conn.index   = df_conn.index.astype(str)
+    df_conn.columns = df_conn.columns.astype(str)
+
+    # 4. Connected components → massflow bounds per component
+    # This applies to both pipeline and ship modes, as the ship mode also have emission from onshore emitters which are connected to the ports via pipeline arcs.
+    G = nx.from_pandas_adjacency(df_conn)   # Function from_pandas_adjacency treats nonzero entries as edges; since connection matrix is binary, this gives us the connectivity graph.  
+    
+    # For each connected component, find the emitters in that component and calculate the min/max emissions to set massflow bounds.
+    # Minimum massflow the pipeline cost model can handle: velocity must be >= vRange_min (0.5 m/s) through the smallest NPS pipe (id ≈ 0.029 m, liquid CO2 density ≈ 850 kg/m³).
+    # 0.5 kg/s gives v ≈ 0.8 m/s through the smallest pipe → safely above 0.5 m/s.
+    min_kg_per_s_limit = 0.5
+
+    component_limits = {}  
+    for component in nx.connected_components(G):
+        emissions_tph = [emission_dict[n] for n in component if n in emission_dict]
+        if emissions_tph:
+            max_kg_per_s = sum(emissions_tph) / 3.6
+            min_kg_per_s = min(emissions_tph) / 3.6
+
+        else:
+            min_kg_per_s = max_kg_per_s = 0.0
+        component_limits[frozenset(component)] = (min_kg_per_s, max_kg_per_s)
+
+    # 5. Instantiate cost model
+    if cost_model_type == "pipeline":
+        model = CO2_Pipeline_CostModel("CO2_Pipeline")
+    elif cost_model_type == "ship":
+        model = CO2_Ship_Dedicated_CostModel("CO2Ship")
+    else:
+        raise ValueError(f"cost_model_type must be 'pipeline' or 'ship', got '{cost_model_type}'")
+
+    # 6. Initialise output gamma matrices
+    gamma_matrices = {
+        g: pd.DataFrame(0.0, index=nodes, columns=nodes)
+        for g in ["gamma1", "gamma2", "gamma3", "gamma4"]
+    }
+
+    n_calculated = 0
+    n_skipped_nonfinite = 0
+
+    # 7. Compute gamma per arc
+    for node_from in nodes:
+        for node_to in nodes:
+
+            # Arc filter
+            if cost_model_type == "pipeline":
+                # Must be explicitly connected in CO2_Pipeline/connection.csv
+                if node_from not in df_conn.index or node_to not in df_conn.columns:
+                    continue
+                if df_conn.loc[node_from, node_to] != 1:
+                    continue
+            # ship: arc exists if distance > 0 in CO2Ship/distance.csv (checked below)
+
+            dist = pd.to_numeric(df_dist.at[node_from, node_to], errors="coerce")
+            if pd.isna(dist) or dist <= 0.0:
+                continue
+
+            # Massflow bounds from pipeline-connected component of node_from
+            # Pipeline: emitters in the component feeding this arc
+            # Ship:     emitters on land feeding into the source port
+            for comp, (mn, mx) in component_limits.items():
+                if node_from in comp:
+                    min_flow, max_flow = mn, mx
+                    break
+            else:
+                continue  # skip 'node_from' not found in any component
+
+            if max_flow < min_kg_per_s_limit:
+                continue  # flow too small for pipeline cost model (velocity would be below vRange_min=0.5 m/s)
+
+            # Guard against degenerate/invalid ranges before running OLS-based models.
+            if min_flow >= max_flow:
+                min_flow = max(min_kg_per_s_limit, 0.5 * max_flow)
+            if min_flow >= max_flow:
+                continue
+
+            # Build options
+            if cost_model_type == "pipeline":
+                options = {
+                    "length_km":             dist,
+                    "massflow_min_kg_per_s": min_flow,
+                    "massflow_max_kg_per_s": max_flow,
+                    "discount_rate":         discount_rate,
+                    "financial_year_out":    financial_year_out_resolved,
+                    "currency_out":          "EUR",
+                    "terrain":               "Onshore",
+                }
+            else:
+                options = {
+                    "distance_km":           dist,
+                    "massflow_min_kg_per_s": min_flow,   # min single emitter in component
+                    "massflow_max_kg_per_s": max_flow,   # sum of all emitters in component
+                    "discount_rate":         discount_rate,
+                    "financial_year_out":    financial_year_out_resolved,
+                    "currency_out":          "EUR",
+                    # c_ship_EUR_per_ship, c_land_EUR → use defaults from model
+                }
+
+            # Run model and store gamma values
+            model.calculate_indicators(options)
+            g1 = pd.to_numeric(model.financial_indicators.get("gamma1"), errors="coerce")
+            g2 = pd.to_numeric(model.financial_indicators.get("gamma2"), errors="coerce")
+            if pd.isna(g1) or pd.isna(g2):
+                n_skipped_nonfinite += 1
+                continue
+
+            gamma_matrices["gamma1"].at[node_from, node_to] = float(g1)
+            gamma_matrices["gamma2"].at[node_from, node_to] = float(g2)
+            # Pipeline distance-dependent OPEX: 13,000 EUR/km/year (maintenance/inspection).
+            # gamma3 remain 0.0
+            # gamma4 remains 0.0
+            n_calculated += 1
+
+    # 8. Export CSVs
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    for name, df in gamma_matrices.items():
+        df.to_csv(output_path / f"{name}.csv", sep=";", float_format="%.4f", index_label="NODE")
+
+    print(
+        f"Gamma matrix ({cost_model_type}) computed arcs: {n_calculated}, "
+        f"skipped non-finite arcs: {n_skipped_nonfinite}"
+    )
+
+    return gamma_matrices
+
 #################### 7. Create NodeLocations.csv ########################
 def create_node_location(altitude, path_model_input):
     """Create NodeLocations.csv for a given node type (emitter, port, storage) with specified altitude. 
