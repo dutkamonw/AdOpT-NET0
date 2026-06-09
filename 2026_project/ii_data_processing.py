@@ -41,7 +41,7 @@ from user_defined_function import (
     copy_network_data_from_db,
     create_emitter_technology,
 )
-from co2_ship_cost_model_V1 import CO2_Ship_Dedicated_CostModel as _ShipModel
+from co2_ship_cost_model import CO2_Ship_Dedicated_CostModel as _ShipModel
 
 
 ##################################################################################################
