@@ -1647,13 +1647,10 @@ def _write_results_excel(target_path: Path):
         co2_capture_per_stor_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
         gap_row += len(co2_capture_per_stor_df) + 3
         co2_capture_per_component_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
-        gap_row += len(co2_capture_per_component_df) + 3
-        co2_capture_emitter_alloc_df.to_excel(writer, sheet_name="CO2_capture", startrow=gap_row)
         print(
             f"  ✅ CO2_capture:   overall={co2_capture_overall_df.shape}, "
             f"per_storage={co2_capture_per_stor_df.shape}, "
-            f"per_component={co2_capture_per_component_df.shape}, "
-            f"emitter_alloc={co2_capture_emitter_alloc_df.shape}"
+            f"per_component={co2_capture_per_component_df.shape}"
         )
 
         # Storage_Utilization: per-storage capacity used / remaining + assigned emitters
@@ -1661,49 +1658,7 @@ def _write_results_excel(target_path: Path):
             storage_utilization_df.to_excel(writer, sheet_name="Storage_Utilization")
             print(f"  ✅ Storage_Utilization: {storage_utilization_df.shape}")
 
-        # ── Scenario comparison sheet (Conservative / Base / Optimistic) ───────────────────
-        # Loads capacity_used_SCENARIO.json from all three sensitivity runs and puts them
-        # side-by-side for easy comparison. Written once all three JSONs exist.
-        _results_dir = Path(__file__).parent / "results"
-        _scen_data = {}
-        for _sn in ["Conservative", "Base", "Optimistic"]:
-            _cap_file = _results_dir / f"capacity_used_{_sn}.json"
-            if _cap_file.exists():
-                with open(_cap_file, "r", encoding="utf-8") as _fh2:
-                    _scen_data[_sn] = json.load(_fh2)
 
-        if len(_scen_data) >= 1:
-            _all_nodes_s = set()
-            for _sd in _scen_data.values():
-                _all_nodes_s.update(_sd.get("storage_nodes", {}).keys())
-
-            _scen_rows = []
-            for _node in sorted(_all_nodes_s):
-                _row_s = {"storage_node": _node}
-                _geo_cap_s = None
-                for _sn2 in ["Conservative", "Base", "Optimistic"]:
-                    if _sn2 not in _scen_data:
-                        continue
-                    _nd2 = _scen_data[_sn2].get("storage_nodes", {}).get(_node, {})
-                    _co2_ann2 = float(_nd2.get("CO2_injected_t_annualized", 0.0))
-                    _opex_v2  = float(_nd2.get("opex_var_EUR_per_t",
-                                              SCENARIO_CONFIG[_sn2]["opex_var_storage_EUR_per_t"]))
-                    if _geo_cap_s is None and _nd2.get("geological_capacity_T") is not None:
-                        _geo_cap_s = float(_nd2["geological_capacity_T"])
-                    _row_s[f"{_sn2}.CO2_injected_tpy"]        = _co2_ann2
-                    _row_s[f"{_sn2}.storage_OPEX_EUR_per_yr"] = _co2_ann2 * _opex_v2
-                    _row_s[f"{_sn2}.OPEX_var_EUR_per_t"]      = _opex_v2
-                _row_s["geological_capacity_T"] = _geo_cap_s
-                _scen_rows.append(_row_s)
-
-            _scen_cmp_df = pd.DataFrame(_scen_rows)
-            _scen_cmp_df.to_excel(writer, sheet_name="Scenario_Comparison", index=False)
-            print(
-                f"  ✅ Scenario_Comparison: {_scen_cmp_df.shape} "
-                f"(scenarios present: {sorted(_scen_data.keys())})"
-            )
-        else:
-            print("  ⏭ Scenario_Comparison: No capacity_used_SCENARIO.json found yet.")
 
 
 actual_output_excel = output_excel
@@ -1937,109 +1892,16 @@ legend_html = """
         <span style="color:#3A3939;">●</span> Inactive Node<br>
         <span style="color:#0074D9;">●</span> Storage Node<br>
         <span style="color:#2ECC40;">▲</span> Port Node<br>
-    <hr style="margin:6px 0">
-        <i style="font-size:11px">Arc thickness follows capacity. Controls are on top-right.</i>
-</div>
-"""
-
-control_html = """
-<div id="map-control-panel" style="position:fixed; top:30px; right:30px; z-index:1000;
-         background:white; padding:12px 14px; border-radius:8px; border:1px solid #bbb;
-         font-size:12px; min-width:220px; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
-    <div style="font-weight:700; margin-bottom:8px;">Map Controls</div>
-    <label for="arcScaleSlider" style="display:block;">Arc scale</label>
-    <input id="arcScaleSlider" type="range" min="0.2" max="3" step="0.1" value="1" style="width:100%;">
-    <div id="arcScaleValue" style="font-size:11px; margin-bottom:8px;">1.0x</div>
-
-    <label for="nodeScaleSlider" style="display:block;">Node scale</label>
-    <input id="nodeScaleSlider" type="range" min="0.2" max="3" step="0.1" value="1" style="width:100%;">
-    <div id="nodeScaleValue" style="font-size:11px; margin-bottom:8px;">1.0x</div>
-
-    <label for="nodeSizeMode" style="display:block;">Node size mode</label>
-    <select id="nodeSizeMode" style="width:100%; padding:2px;">
-        <option value="emission" selected>Based on emission</option>
-        <option value="equal">Equal size</option>
-    </select>
-    <hr style="margin:8px 0">
-    <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-        <input type="checkbox" id="showArrows" checked>
-        Show direction arrows
-    </label>
 </div>
 """
 
 m.get_root().html.add_child(folium.Element(legend_html))
-m.get_root().html.add_child(folium.Element(control_html))
 
 map_var = m.get_name()
 arc_js = json.dumps(arc_js_meta)
 node_js = json.dumps(node_js_meta)
 arrow_js = json.dumps(arrow_js_meta)
 
-m_script = f"""
-<script>
-(function() {{
-    var mapObj = {map_var};
-    var arcMeta = {arc_js};
-    var nodeMeta = {node_js};
-    var arrowMeta = {arrow_js};
-
-    function applyArcScale() {{
-        var scale = parseFloat(document.getElementById('arcScaleSlider').value || '1');
-        document.getElementById('arcScaleValue').textContent = scale.toFixed(1) + 'x';
-        arcMeta.forEach(function(item) {{
-            var layer = window[item.id];
-            if (layer && layer.setStyle) {{
-                layer.setStyle({{weight: Math.max(0.8, item.baseWeight * scale)}});
-            }}
-        }});
-    }}
-
-    function applyNodeScale() {{
-        var scale = parseFloat(document.getElementById('nodeScaleSlider').value || '1');
-        var mode = document.getElementById('nodeSizeMode').value;
-        document.getElementById('nodeScaleValue').textContent = scale.toFixed(1) + 'x';
-        nodeMeta.forEach(function(item) {{
-            var layer = window[item.id];
-            if (!layer || !layer.setRadius) return;
-            var base = (mode === 'equal') ? item.equalRadius : item.emissionRadius;
-            layer.setRadius(Math.max(1.0, base * scale));
-        }});
-    }}
-
-    function applyArrowToggle() {{
-        var show = document.getElementById('showArrows').checked;
-        arrowMeta.forEach(function(item) {{
-            var layer = window[item.id];
-            if (!layer || !layer.setText) return;
-            layer.setText(show ? item.text : null);
-        }});
-    }}
-
-    function initControls() {{
-        var arcSlider = document.getElementById('arcScaleSlider');
-        var nodeSlider = document.getElementById('nodeScaleSlider');
-        var nodeMode = document.getElementById('nodeSizeMode');
-        var arrowToggle = document.getElementById('showArrows');
-        if (!arcSlider || !nodeSlider || !nodeMode) return;
-        arcSlider.addEventListener('input', applyArcScale);
-        nodeSlider.addEventListener('input', applyNodeScale);
-        nodeMode.addEventListener('change', applyNodeScale);
-        if (arrowToggle) arrowToggle.addEventListener('change', applyArrowToggle);
-        // Always update values on load
-        applyArcScale();
-        applyNodeScale();
-        applyArrowToggle();
-        // Also update value displays immediately
-        document.getElementById('arcScaleValue').textContent = arcSlider.value + 'x';
-        document.getElementById('nodeScaleValue').textContent = nodeSlider.value + 'x';
-    }}
-
-    mapObj.whenReady(initControls);
-}})();
-</script>
-"""
-m.get_root().html.add_child(folium.Element(m_script))
 folium.LayerControl(collapsed=False).add_to(m)
 m.save(str(output_map))
 print(f"✅ Map saved → {output_map}")

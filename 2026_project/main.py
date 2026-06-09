@@ -73,41 +73,12 @@ prepare_inputs = True # Step 5) to 12) Formating inputs from update global model
 run_model = False # Step 13) run the optimization model
 
 ############################### SCENARIO CONFIGURATION ########################################
-# Sensitivity analysis: three CO2 storage cost/rate scenarios for a 2050-representative system.
-# Infrastructure (routes, CAPEX) is fully co-optimized in each run → results are self-consistent.
 
-# The High/Medium/Low levelised storage cost are from Italian report "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic and regulatory aspects functional to the development of the CCUS supply chain], by Ministero dell'Ambiente e della Sicurezza Energetica [Ministry of Environment and Energy Security], 2024.
-# So, use them as OPEX variable for storage to cover all costs related to storage
-# The injection rate is set as a fraction of geological storage capacity per year, approximately from ramp up strategy in Ravenna and Prinos
+# The injection rate is set as a fraction of geological storage capacity per year
+percentage_injection = 0.04             # fixed at 4 % of geological capacity per year (Base mid-case)
+opex_var_storage_EUR_per_t =  50.6      # EUR/tCO2 based on Ravenna base case levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
+ccs_reduction_target  = 0.8             # % target reduction used for emission_limit = 1 - ccs_reduction_target 
 
-SCENARIO = "Base"
-
-# Injection rate is fixed at the Base mid-case rate for all scenarios.
-# Only OPEX_variable (levelised storage cost) differs between scenarios.
-# Varying injection rate would change physical storage throughput and risk infeasibility
-# for Conservative (lower rate) — keeping it fixed makes scenarios directly comparable.
-INJECTION_RATE_PCT_PER_YEAR = 0.04   # fixed at 4 % of geological capacity per year (Base mid-case)
-
-SCENARIO_CONFIG = {
-    "Conservative": {
-        "label":                       "Conservative_EarlyPhase",
-        "opex_var_storage_EUR_per_t":  75.8,
-    },
-    "Base": {
-        "label":                       "Base_MidPhase",
-        "opex_var_storage_EUR_per_t":  50.6,
-    },
-    "Optimistic": {
-        "label":                       "Optimistic_MaturePhase",
-        "opex_var_storage_EUR_per_t":  42.5,
-    },
-}
-_sc = SCENARIO_CONFIG[SCENARIO]
-
-print(f"SCENARIO: {SCENARIO}  ({_sc['label']})")
-print(f"  injection_rate_pct/yr : {INJECTION_RATE_PCT_PER_YEAR*100:.0f} % (fixed, same for all scenarios)")
-print(f"  OPEX_var storage      : {_sc['opex_var_storage_EUR_per_t']} EUR/t")
-print(f"{'='*60}\n")
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
 
@@ -210,6 +181,16 @@ if prepare_inputs:
     # Define parameter
     altitude = 10  # assign altitude value to all nodes
 
+    # Get annual_total_emission from total emission_tpa of all emitters in combined_selected table in database.duckdb
+    con = duckdb.connect(str(db_path))
+    try:
+        annual_total_emission = con.execute("SELECT SUM(emission_TPA) AS annual_total_emission FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").fetchone()[0]
+    except:
+        annual_total_emission = con.execute("SELECT SUM(emission_TPA) AS annual_total_emission FROM combined_selected WHERE type = 'emitter'").fetchone()[0]
+    con.close()
+
+    print(f"Annual total emission from database: {annual_total_emission:.2f} tCO2 per year")
+
     # Run function
     create_node_location(altitude, path_model_input)
     print("Updated NodeLocation.csv: Completed")
@@ -224,8 +205,6 @@ if prepare_inputs:
     configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
     # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
     # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
-    annual_total_emission = 66998708.72   # tCO2/year from all selected emitters
-    ccs_reduction_target  = 0.5           # % reduction
     configuration["optimization"]["emission_limit"]["value"] = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
     #configuration["optimization"]["objective"]["value"] = "costs"
 
@@ -417,7 +396,7 @@ if prepare_inputs:
             node_name = str(row['node_name'])
 
             # Injection rate = fixed fraction of geological capacity (t/h), same across all scenarios
-            injection_rate = capacity * INJECTION_RATE_PCT_PER_YEAR / 8760
+            injection_rate = capacity * percentage_injection / 8760
 
             # size_max caps injectable CO2 over the modelled horizon (physically achievable upper bound).
             # Uses fraction_of_year_modelled so it updates automatically when Topology dates change.
@@ -432,12 +411,12 @@ if prepare_inputs:
                 data["size_max"] = round(size_max, 2)
                 data["Flexibility"]["injection_rate_max"] = round(injection_rate, 4)
                 # Set levelised storage cost for this scenario (amortised CAPEX + OPEX per tCO2)
-                data["Economics"]["OPEX_variable"] = _sc["opex_var_storage_EUR_per_t"]
+                data["Economics"]["OPEX_variable"] = opex_var_storage_EUR_per_t
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
 
     print(
-        f"Updated injection rate & OPEX_var ({_sc['opex_var_storage_EUR_per_t']} EUR/t) "
+        f"Updated PermanentStorage_CO2_simple JSON files"
         f"for {len(storage_df)} storage nodes: Completed"
     )
 
