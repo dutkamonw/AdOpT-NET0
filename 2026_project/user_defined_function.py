@@ -1619,10 +1619,10 @@ def create_node_location(altitude, path_model_input):
     
     try:
         # Try to query combined_selected_final first
-        nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected_final WHERE selection ='Yes'").fetchdf()
+        nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected_final WHERE selection ='Yes' AND longitude IS NOT NULL AND latitude IS NOT NULL").fetchdf()
     except duckdb.CatalogException:
         # If table doesn't exist, fall back to combined_selected
-        nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected").fetchdf()
+        nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected WHERE longitude IS NOT NULL AND latitude IS NOT NULL").fetchdf()
     
     con.close()
 

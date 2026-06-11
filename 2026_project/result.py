@@ -79,7 +79,7 @@ name_repair = {
     "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi":
         "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
     "EVERÃ‰ SAS":          "ÉVERÉ SAS",
-}
+}   
 
 def normalize(s):
     if isinstance(s, bytes):
@@ -435,9 +435,57 @@ components_out.index += 1
 
 components_without_sink = components_out[components_out["has_sink"] == False]
 
+# ── Add upfront CAPEX and transparency columns for arcs ────────────────────
+# Build annualization factors by mode from network JSONs
+base_dir = h5_file.parent.parent.parent  # 2026_project
+mode_af_map = {}
+try:
+    for mode in ["CO2_Pipeline", "CO2Ship"]:
+        p = base_dir / "3_model_inputs" / "period1" / "network_data" / f"{mode}.json"
+        if p.exists():
+            with open(p) as fh:
+                jd = json.load(fh)
+            eco = jd.get("Economics", {})
+            dr = float(eco.get("discount_rate", 0.1))
+            lt = float(eco.get("lifetime", 25))
+            # Use global discount rate if defined
+            try:
+                cfg_p = base_dir / "3_model_inputs" / "ConfigModel.json"
+                with open(cfg_p) as cfh:
+                    cfg = json.load(cfh)
+                global_dr = cfg.get("economic", {}).get("global_discountrate", {}).get("value", -1)
+                if global_dr >= 0:
+                    dr = global_dr
+            except Exception:
+                pass
+            # Annualization factor: r / (1 - (1/(1+r)^n) * year_fraction
+            if dr == 0:
+                af = (1.0 / lt) * year_fraction
+            else:
+                af = (dr / (1 - (1 / (1 + dr) ** lt))) * year_fraction
+            mode_af_map[mode] = af
+except Exception as e:
+    print(f"[WARN] Could not load network annualization factors: {e}")
+
+# Add upfront_capex_EUR to arcs (capex shown is annualized; compute upfront)
+def compute_upfront_capex(row):
+    try:
+        if pd.isna(row["capex"]) or pd.isna(row["mode"]):
+            return None
+        af = mode_af_map.get(str(row["mode"]).strip())
+        if af is None or af <= 0:
+            return None
+        return float(row["capex"]) / af
+    except Exception:
+        return None
+
+networks_wide["upfront_capex_EUR"] = networks_wide.apply(compute_upfront_capex, axis=1)
+active_arcs["upfront_capex_EUR"] = active_arcs.apply(compute_upfront_capex, axis=1)
+inactive_arcs["upfront_capex_EUR"] = inactive_arcs.apply(compute_upfront_capex, axis=1)
+
 # Reorder columns nicely
 arc_cols = ["mode","fromNode","toNode","size","total_flow",
-            "total_emissions","capex","opex_fixed","opex_variable",
+            "total_emissions","upfront_capex_EUR","capex","opex_fixed","opex_variable",
             "para_capex_gamma1","para_capex_gamma2",
             "para_capex_gamma3","para_capex_gamma4"]
 arc_cols = [c for c in arc_cols if c in networks_wide.columns]
@@ -465,6 +513,14 @@ nodes_combined["CO2_captured_t_annualized"] = (
 # Final storage: downstream geological storage node(s) this node ultimately sends CO2 to.
 nodes_combined["final_storage"] = nodes_combined["node"].apply(_final_storage)
 
+# For nodes: capex_tot is already annualized in H5; compute implied upfront using global AF as proxy
+# (Note: individual technology economics may vary, this is approximate)
+nodes_combined["upfront_capex_tot_approx_EUR"] = np.where(
+    (pd.to_numeric(nodes_combined["capex_tot"], errors="coerce") > 0) & (annualization_factor_nodes > 0),
+    pd.to_numeric(nodes_combined["capex_tot"], errors="coerce") / annualization_factor_nodes,
+    None
+)
+
 # capex_tot and opex_fixed_tot are already annualized in the H5 design output.
 # opex_variable is the raw modelled-period total and must be scaled to annual basis.
 nodes_combined["node_direct_cost_EUR"] = (
@@ -488,7 +544,7 @@ nodes_combined = nodes_combined.rename(
 )
 
 combined_node_cols = ["node","status","iso2","role","final_storage","technology","existing","size","size_ccs",
-                      "capex_tec","capex_ccs","capex_tot",
+                      "upfront_capex_tot_approx_EUR","capex_tec","capex_ccs","capex_tot",
                       "opex_fixed_tot","opex_fixed_ccs","opex_variable",
                       "emissions_pos","emissions_neg","para_unitCAPEX",
                       "CO2_captured_t_modelled","CO2_captured_t_annualized",
@@ -506,7 +562,7 @@ arcs_combined["iso2"] = arcs_combined["fromNode"].map(
     lambda n: node_iso2_map.get(str(n).strip(), "")
 )
 combined_arc_cols = ["mode","status","fromNode","iso2","toNode","size","total_flow",
-                     "total_emissions","capex","opex_fixed","opex_variable",
+                     "total_emissions","upfront_capex_EUR","capex","opex_fixed","opex_variable",
                      "para_capex_gamma1","para_capex_gamma2",
                      "para_capex_gamma3","para_capex_gamma4"]
 combined_arc_cols = [c for c in combined_arc_cols if c in arcs_combined.columns]
@@ -1179,6 +1235,9 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "import_export_net_cost_per_t_annualized", "value": import_export_net_cost_per_t, "unit": "€/t CO2", "note": "Annualized: (cost_imports + cost_exports) / total_CO2_injected_annualized"},
         {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "total_cost - LCCS_modelled_period (residual = imports/exports/carbon/violation)"},
         {"metric": "LCCS_share_of_total_cost",       "value": (lccs_mod_bu / total_cost if (total_cost is not None and total_cost != 0) else None), "unit": "-", "note": "LCCS_modelled_period / total_cost"},
+        # ── UPFRONT CAPEX TRANSPARENCY ──────────────────────────────────────────────────────
+        {"metric": "note_upfront_capex_definition", "value": "Arc 'capex' shown in results = annualized CAPEX; 'upfront_capex_EUR' reconstructed as annualized_capex / annualization_factor", "unit": "text", "note": "Upfront (up-front, pre-discounted) CAPEX is the equivalent present-value investment needed at t=0 to finance the annualized costs over the asset lifetime"},
+        {"metric": "note_network_opex_fixed_formula", "value": "network opex_fixed = OPEX_fixed_param (as % of CAPEX) × upfront_capex; e.g. 0.04 × upfront_capex (where 0.04=4% from network JSON)", "unit": "text", "note": "Fixed OPEX is applied to upfront CAPEX, not annualized CAPEX, per model design in adopt_net0/components/networks/network.py"},
         # full_chain is appended after comp_cost_df is built (see below)
     ]
     overall_df = pd.DataFrame(overall_rows)
@@ -1451,56 +1510,6 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
 co2_capture_overall_df, co2_capture_per_stor_df, co2_capture_per_component_df, co2_capture_emitter_alloc_df = _build_co2_capture_df(
     h5_file, nodes_wide, networks_wide, raw_summary
 )
-
-# ── Save per-storage capacity tracking JSON for the next scenario run ──────────────────────
-# Used by main.py step 11 (2045 and 2050) to deduct prior injections from geological capacity.
-_cap_T_map = {}
-if db_path.exists():
-    try:
-        _con = duckdb.connect(str(db_path), read_only=True)
-        _cap_df = _con.execute(
-            "SELECT name_sanitized, capacity_T FROM combined_selected_final "
-            "WHERE type = 'storage' AND selection = 'Yes'"
-        ).df()
-        _con.close()
-        _cap_T_map = {
-            str(r["name_sanitized"]): float(r["capacity_T"])
-            for _, r in _cap_df.iterrows()
-            if pd.notna(r["capacity_T"])
-        }
-    except Exception as _e:
-        print(f"[WARN] Could not read capacity_T from DB for tracking: {_e}")
-
-_capacity_tracking = {}
-for _, _row in co2_capture_per_stor_df.iterrows():
-    _node = str(_row["node"])
-    _capacity_tracking[_node] = {
-        "CO2_injected_t_modelled":   float(_row["CO2_injected_t_modelled"]),
-        "CO2_injected_t_annualized": float(_row["CO2_injected_t_annualized"]),
-        "injection_capacity_tph":    float(_row["injection_capacity_tph"]),
-        "opex_var_EUR_per_t":        _sc_result["opex_var_storage_EUR_per_t"],
-        "geological_capacity_T":     _cap_T_map.get(_node),
-    }
-
-_af_val = None
-_af_rows = co2_capture_overall_df.loc[co2_capture_overall_df["metric"] == "annualization_factor", "value"]
-if not _af_rows.empty:
-    try:
-        _af_val = float(_af_rows.iloc[0])
-    except (ValueError, TypeError):
-        pass
-
-_capacity_json_path = Path(__file__).parent / "results" / f"capacity_used_{SCENARIO}.json"
-_capacity_json_path.parent.mkdir(parents=True, exist_ok=True)
-with open(_capacity_json_path, "w", encoding="utf-8") as _fh:
-    json.dump({
-        "scenario":             SCENARIO,
-        "label":                _sc_result["label"],
-        "run_folder":           h5_file.parent.name,
-        "annualization_factor": _af_val,
-        "storage_nodes":        _capacity_tracking,
-    }, _fh, indent=4)
-print(f"Saved capacity tracking -> {_capacity_json_path}")
 
 # ── Build Storage_Utilization DataFrame ──────────────────────────────────────────────────────
 # Re-read storage JSONs for size_max / injection_rate_max / OPEX_variable as written by main.py.

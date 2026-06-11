@@ -77,7 +77,7 @@ run_model = False # Step 13) run the optimization model
 # The injection rate is set as a fraction of geological storage capacity per year
 percentage_injection = 0.04             # fixed at 4 % of geological capacity per year (Base mid-case)
 opex_var_storage_EUR_per_t =  50.6      # EUR/tCO2 based on Ravenna base case levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
-ccs_reduction_target  = 0.8             # % target reduction used for emission_limit = 1 - ccs_reduction_target 
+ccs_reduction_target  = 0.7             # % target reduction used for emission_limit = 1 - ccs_reduction_target 
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -168,7 +168,7 @@ print(f"Preparation inputs is {prepare_inputs}")
 
 # Auto-compute fraction of year modelled from Topology.json start/end dates. This is used to scale emission_limit and storage size_max consistently.
 with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as _topo_f:
-    _topo = json.load(_topo_f)
+    _topo =u json.load(_topo_f)
 _topo_start = pd.Timestamp(_topo["start_date"])
 _topo_end   = pd.Timestamp(_topo["end_date"])
 _modelled_hours = (_topo_end - _topo_start).total_seconds() / 3600 + 1  # +1 to include last hour
@@ -205,8 +205,16 @@ if prepare_inputs:
     configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
     # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
     # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
-    configuration["optimization"]["emission_limit"]["value"] = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
+    emission_limit_value = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
+    configuration["optimization"]["emission_limit"]["value"] = emission_limit_value
     #configuration["optimization"]["objective"]["value"] = "costs"
+
+    emissions_in_horizon = annual_total_emission * fraction_of_year_modelled
+    required_capture = emissions_in_horizon - emission_limit_value
+    print(
+        f"Emission target summary: emissions_in_horizon={emissions_in_horizon:.2f} tCO2, "
+        f"emission_limit={emission_limit_value:.2f} tCO2, required_capture={required_capture:.2f} tCO2"
+    )
 
     # Set value to define MIP gap for the optimization solver
     configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
@@ -389,6 +397,7 @@ if prepare_inputs:
     con.close()
 
     if not storage_df.empty:
+        total_size_max = 0.0
         for _, row in storage_df.iterrows():
             if pd.isna(row['capacity_T']):
                 continue
@@ -401,6 +410,7 @@ if prepare_inputs:
             # size_max caps injectable CO2 over the modelled horizon (physically achievable upper bound).
             # Uses fraction_of_year_modelled so it updates automatically when Topology dates change.
             size_max = min(capacity, injection_rate * 8760 * fraction_of_year_modelled)
+            total_size_max += size_max
 
             json_path = (path_model_input / "period1" / "node_data" / node_name
                          / "technology_data" / "PermanentStorage_CO2_simple.json")
@@ -414,6 +424,16 @@ if prepare_inputs:
                 data["Economics"]["OPEX_variable"] = opex_var_storage_EUR_per_t
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
+
+        storage_margin = total_size_max - required_capture
+        print(
+            f"Storage feasibility check: max_injectable={total_size_max:.2f} tCO2, "
+            f"required_capture={required_capture:.2f} tCO2, margin={storage_margin:.2f} tCO2"
+        )
+        if storage_margin < 0:
+            print(
+                "WARNING: Storage capacity limit < Required capture. Model can become infeasible even before considering transport connectivity/losses."
+            )
 
     print(
         f"Updated PermanentStorage_CO2_simple JSON files"
