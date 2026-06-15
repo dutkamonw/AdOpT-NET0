@@ -63,21 +63,21 @@ db_path = script_dir / "database.duckdb"
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
 initialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
 raw_prep = False # Step 2) ETL raw data to database
-data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
+data_process = False # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
-manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
+manual_update_network = False  # Optional step (if there is a manual update on node selection and transportation routes))
 
-building_node_folder = True # Step 4) create node folders based on Topology.json
+building_node_folder = False # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = False # Step 13) run the optimization model
+run_model = True # Step 13) run the optimization model
 
 ############################### SCENARIO CONFIGURATION ########################################
 
 # The injection rate is set as a fraction of geological storage capacity per year
 percentage_injection = 0.04             # fixed at 4 % of geological capacity per year (Base mid-case)
-opex_var_storage_EUR_per_t =  50.6      # EUR/tCO2 based on Ravenna base case levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
-ccs_reduction_target  = 0.7             # % target reduction used for emission_limit = 1 - ccs_reduction_target 
+opex_var_storage_EUR_per_t = 61.6     # 42.5-50.6-75.8 EUR/tCO2 based on Ravenna levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
+ccs_reduction_target  = 0.40            # % target reduction used for emission_limit = 1 - ccs_reduction_target
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -168,7 +168,7 @@ print(f"Preparation inputs is {prepare_inputs}")
 
 # Auto-compute fraction of year modelled from Topology.json start/end dates. This is used to scale emission_limit and storage size_max consistently.
 with open(path_model_input / "Topology.json", 'r', encoding='utf-8') as _topo_f:
-    _topo =u json.load(_topo_f)
+    _topo = json.load(_topo_f)
 _topo_start = pd.Timestamp(_topo["start_date"])
 _topo_end   = pd.Timestamp(_topo["end_date"])
 _modelled_hours = (_topo_end - _topo_start).total_seconds() / 3600 + 1  # +1 to include last hour
@@ -201,13 +201,13 @@ if prepare_inputs:
         configuration = json.load(json_file)
 
     # Set optimization objective (select from existing options in ConfigModel.json)
-     #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+    #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
     configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
     # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
     # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
     emission_limit_value = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
     configuration["optimization"]["emission_limit"]["value"] = emission_limit_value
-    #configuration["optimization"]["objective"]["value"] = "costs"
+
 
     emissions_in_horizon = annual_total_emission * fraction_of_year_modelled
     required_capture = emissions_in_horizon - emission_limit_value

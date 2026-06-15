@@ -4,14 +4,17 @@ import pandas as pd
 import numpy as np
 import folium
 from folium.plugins import PolyLineTextPath
+import os
 import unicodedata
 import json
 import networkx as nx
 import sys
 from pathlib import Path
 from datetime import datetime
+import ast
 import duckdb
 from adopt_net0.result_management.read_results import extract_datasets_from_h5group
+from user_defined_function import canonicalize_name
 
 # Ensure UTF-8 output to terminal to avoid encoding errors with non-ASCII node names
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -47,39 +50,46 @@ try:
 except Exception as e:
     print(f"[WARN] Could not load iso2 map from database: {e}")
 
-# Set the exact run file here (single-run mode).
-h5_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\results\20260607043639-1_3M_SL10K_MG2_L0_NF0_CC0_LQ_80%\optimization_results.h5")
-node_loc_file = Path(r"C:\Users\dutka\MT\AdOpT-NET0_dw\2026_project\3_model_inputs\NodeLocations.csv")
-output_excel  = h5_file.parent / "results.xlsx"
-output_map    = h5_file.parent / "network_map.html"
+# Set result file.
+# In batch mode, loop_model.py passes ADOPT_H5_FILE.
+# In single-run mode, this script falls back to the newest optimization_results.h5 in results/.
+PROJECT_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = PROJECT_DIR / "results"
 
-# ── SCENARIO CONFIGURATION (keep in sync with main.py) ──────────────────────────────────────
-# Set SCENARIO to the same value used in main.py when this result was generated.
-# Used to name the capacity-tracking JSON output.
-SCENARIO = "Base"  # ← CHANGE THIS: "Conservative", "Base", or "Optimistic"
 
-SCENARIO_CONFIG = {
-    "Conservative": {"label": "Conservative_EarlyPhase",  "opex_var_storage_EUR_per_t": 75.8},
-    "Base":         {"label": "Base_MidPhase",             "opex_var_storage_EUR_per_t": 50.6},
-    "Optimistic":   {"label": "Optimistic_MaturePhase",    "opex_var_storage_EUR_per_t": 42.5},
-}
-_sc_result = SCENARIO_CONFIG[SCENARIO]
+def find_newest_h5(results_dir: Path) -> Path | None:
+    if not results_dir.exists():
+        return None
+    h5_files = list(results_dir.glob("**/optimization_results.h5"))
+    if not h5_files:
+        return None
+    return max(h5_files, key=lambda p: p.stat().st_mtime)
+
+
+_env_h5 = os.environ.get("ADOPT_H5_FILE")
+if _env_h5:
+    h5_file = Path(_env_h5)
+else:
+    _newest = find_newest_h5(RESULTS_DIR)
+    if _newest is None:
+        raise FileNotFoundError(f"No optimization_results.h5 found under {RESULTS_DIR}")
+    h5_file = _newest
+
+node_loc_file = PROJECT_DIR / "3_model_inputs" / "NodeLocations.csv"
+output_excel = h5_file.parent / "results.xlsx"
+output_map = h5_file.parent / "network_map.html"
+
+print(f"Reading H5 file: {h5_file}")
+print(f"Excel output:   {output_excel}")
+print(f"Map output:     {output_map}")
+
+if not h5_file.exists():
+    raise FileNotFoundError(f"optimization_results.h5 not found: {h5_file}")
+
 
 # ══════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════
-
-name_repair = {
-    "BatÄ±Ã§im Bornova Cement Plant":
-        "Batıçim Bornova Cement Plant",
-    "Ä°DÃ‡ Izdemir Aliaga steel plant":
-        "İDÇ Izdemir Aliaga steel plant",
-    "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÃ‡ DELS HORTS)":
-        "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÇ DELS HORTS)",
-    "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi":
-        "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
-    "EVERÃ‰ SAS":          "ÉVERÉ SAS",
-}   
 
 def normalize(s):
     if isinstance(s, bytes):
@@ -89,19 +99,23 @@ def normalize(s):
                       .decode("ascii").strip()
 
 def repair_name(s):
-    if isinstance(s, bytes):
-        s = s.decode("utf-8", errors="replace")
-    s = str(s).strip()
-    if s in name_repair:
-        return name_repair[s]
-    try:
-        return s.encode("latin-1").decode("utf-8")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        return s
+    # Keep wrapper name for local call sites; delegate to shared project logic.
+    return canonicalize_name(s)
 
 def decode(v):
-    """Decode bytes to str, leave everything else as-is."""
-    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+    """Decode bytes and byte-literal strings to plain str."""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    if isinstance(v, str):
+        s = v.strip()
+        if (s.startswith("b'") and s.endswith("'")) or (s.startswith('b"') and s.endswith('"')):
+            try:
+                lit = ast.literal_eval(s)
+                if isinstance(lit, bytes):
+                    return lit.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+    return v
 
 def parse_linestring_wkt(wkt_str):
     """Parse LINESTRING WKT into folium path format [(lat, lon), ...]."""
@@ -261,6 +275,7 @@ with h5py.File(h5_file, "r") as f:
     raw_nodes     = extract_datasets_from_h5group(f["design"]["nodes"])
     raw_networks  = extract_datasets_from_h5group(f["design"]["networks"])
     raw_tec_op    = extract_datasets_from_h5group(f["operation"]["technology_operation"])
+    raw_eb        = extract_datasets_from_h5group(f["operation"]["energy_balance"])
 
 # Shared annualization factor for node-level KPIs
 topology_cfg_path = Path(__file__).parent / "3_model_inputs" / "Topology.json"
@@ -291,6 +306,50 @@ for k, v in raw_tec_op.items():
     if var == "CO2captured_var_output_ccs":
         node_co2_captured_modelled[node] = node_co2_captured_modelled.get(node, 0.0) + float(np.array(v).sum())
 
+
+def _sum_product(a, b) -> float:
+    """Safe sum(a*b) for arrays/scalars with shape mismatch fallback."""
+    aa = np.array(a, dtype=float)
+    bb = np.array(b, dtype=float)
+    if aa.shape != bb.shape:
+        n = int(min(aa.size, bb.size))
+        if n <= 0:
+            return 0.0
+        return float(np.sum(aa.reshape(-1)[:n] * bb.reshape(-1)[:n]))
+    return float(np.sum(aa * bb))
+
+
+# Per-node import cost from operation energy balance:
+# cost_import_node = sum_t,car(import * import_price)
+node_import_cost_modelled = {}
+# Per-node transport-related import cost proxy:
+# network_cost_import_node = sum_t,car(network_consumption * import_price)
+node_network_import_cost_modelled = {}
+
+for k, v in raw_eb.items():
+    if not (isinstance(k, tuple) and len(k) == 4):
+        continue
+    period, node, carrier, var = k
+    if var not in ("import", "network_consumption"):
+        continue
+    price_key = (period, node, carrier, "import_price")
+    if price_key not in raw_eb:
+        continue
+    amount = _sum_product(v, raw_eb[price_key])
+    if var == "import":
+        node_import_cost_modelled[node] = node_import_cost_modelled.get(node, 0.0) + amount
+    else:
+        node_network_import_cost_modelled[node] = (
+            node_network_import_cost_modelled.get(node, 0.0) + amount
+        )
+
+node_import_cost_annualized = {
+    n: c * annualization_factor_nodes for n, c in node_import_cost_modelled.items()
+}
+node_network_import_cost_annualized = {
+    n: c * annualization_factor_nodes for n, c in node_network_import_cost_modelled.items()
+}
+
 # ── Parse nodes into wide DataFrame ──────────────────────
 # Index = (period, node_name, technology, variable)
 NODE_VARS = [
@@ -313,6 +372,11 @@ for idx, row in pd.DataFrame.from_dict(raw_nodes, orient="index").iterrows():
     node_records[key][variable] = decode(row.iloc[0])
 
 nodes_wide = pd.DataFrame(list(node_records.values()))
+
+# Normalize problematic names for reliable Arc/Node joins.
+for col in ["node", "technology"]:
+    if col in nodes_wide.columns:
+        nodes_wide[col] = nodes_wide[col].apply(lambda x: repair_name(decode(x)))
 
 # Clean numeric columns
 for col in ["size","size_ccs","capex_tec","capex_ccs","capex_tot",
@@ -348,7 +412,7 @@ networks_wide = pd.DataFrame(list(net_records.values()))
 # Repair node names
 for col in ["fromNode", "toNode"]:
     if col in networks_wide.columns:
-        networks_wide[col] = networks_wide[col].apply(repair_name)
+        networks_wide[col] = networks_wide[col].apply(lambda x: repair_name(decode(x)))
 
 # Clean numeric columns
 for col in ["size","total_flow","total_emissions","capex",
@@ -383,14 +447,14 @@ def get_role(n):
 active_nodes["role"] = active_nodes["node"].apply(get_role)
 inactive_nodes["role"] = inactive_nodes["node"].apply(lambda _: "inactive")
 
-# Identify sink-like nodes and perform active-network component sanity checks.
+# Identify storage nodes and perform active-network component sanity checks.
 storage_nodes = set(
     nodes_wide.loc[
         nodes_wide["technology"].astype(str).str.contains("storage", case=False, na=False),
         "node",
     ].tolist()
 )
-sink_like_nodes = (to_set - from_set) | storage_nodes
+terminal_nodes = (to_set - from_set)
 
 # Directed graph: used to trace which storage node each emitter/transit ultimately feeds into.
 _digraph = nx.DiGraph()
@@ -418,14 +482,17 @@ for comp_id, comp_nodes in enumerate(nx.connected_components(active_graph), star
     comp_arcs = active_arcs[
         active_arcs["fromNode"].isin(comp_set) & active_arcs["toNode"].isin(comp_set)
     ]
-    comp_sinks = sorted(comp_set & sink_like_nodes)
+    comp_storage = sorted(comp_set & storage_nodes)
+    comp_terminal = sorted(comp_set & terminal_nodes)
     comp_emitters = sorted(comp_set & from_set)
     component_rows.append({
         "component_id": comp_id,
         "n_nodes": len(comp_set),
         "n_arcs": len(comp_arcs),
-        "has_sink": bool(comp_sinks),
-        "sink_nodes": " | ".join(comp_sinks),
+        "has_storage_sink": bool(comp_storage),
+        "storage_sink_nodes": " | ".join(comp_storage),
+        "has_terminal_node": bool(comp_terminal),
+        "terminal_nodes": " | ".join(comp_terminal),
         "example_emitters": " | ".join(comp_emitters[:6]),
         "all_nodes": " | ".join(comp_nodes),
     })
@@ -433,7 +500,7 @@ for comp_id, comp_nodes in enumerate(nx.connected_components(active_graph), star
 components_out = pd.DataFrame(component_rows).sort_values("component_id").reset_index(drop=True)
 components_out.index += 1
 
-components_without_sink = components_out[components_out["has_sink"] == False]
+components_without_sink = components_out[components_out["has_storage_sink"] == False]
 
 # ── Add upfront CAPEX and transparency columns for arcs ────────────────────
 # Build annualization factors by mode from network JSONs
@@ -510,6 +577,15 @@ nodes_combined["CO2_captured_t_annualized"] = (
     pd.to_numeric(nodes_combined["CO2_captured_t_modelled"], errors="coerce").fillna(0.0)
     * annualization_factor_nodes
 )
+nodes_combined["cost_import_EUR_modelled"] = nodes_combined["node"].map(
+    lambda n: node_import_cost_modelled.get(str(n), 0.0)
+)
+nodes_combined["cost_import"] = nodes_combined["node"].map(
+    lambda n: node_import_cost_annualized.get(str(n), 0.0)
+)
+nodes_combined["network_cost_import_EUR_annualized"] = nodes_combined["node"].map(
+    lambda n: node_network_import_cost_annualized.get(str(n), 0.0)
+)
 # Final storage: downstream geological storage node(s) this node ultimately sends CO2 to.
 nodes_combined["final_storage"] = nodes_combined["node"].apply(_final_storage)
 
@@ -547,6 +623,7 @@ combined_node_cols = ["node","status","iso2","role","final_storage","technology"
                       "upfront_capex_tot_approx_EUR","capex_tec","capex_ccs","capex_tot",
                       "opex_fixed_tot","opex_fixed_ccs","opex_variable",
                       "emissions_pos","emissions_neg","para_unitCAPEX",
+                      "cost_import","cost_import_EUR_modelled","network_cost_import_EUR_annualized",
                       "CO2_captured_t_modelled","CO2_captured_t_annualized",
                       "node_capture_only_cost_EUR","node_capture_only_cost_EUR_per_t_annualized"]
 combined_node_cols = [c for c in combined_node_cols if c in nodes_combined.columns]
@@ -867,26 +944,6 @@ def _build_parameters_df(h5_file_path: Path) -> pd.DataFrame:
         except Exception as e:
             _add_row(f"{net_name}", str(e), "", "Error loading", f"{net_name}.json")
 
-    # ── Scenario configuration ────────────────────────────
-    _add_row("scenario.name",   SCENARIO,                                  "-",       "Active scenario name (Conservative / Base / Optimistic)", "result.py SCENARIO")
-    _add_row("scenario.label",  _sc_result["label"],                       "-",       "Descriptive label for this scenario",                      "result.py SCENARIO_CONFIG")
-    _add_row("scenario.storage_OPEX_variable", _sc_result["opex_var_storage_EUR_per_t"], "€/t CO2", "Levelised storage cost used for PermanentStorage_CO2_simple OPEX_variable", "result.py SCENARIO_CONFIG")
-    # Read injection rate directly from the first storage JSON found (written by main.py step 11)
-    try:
-        _stor_jsons = sorted(
-            (h5_file_path.parent.parent.parent / "3_model_inputs" / "period1" / "node_data")
-            .glob("*/technology_data/PermanentStorage_CO2_simple.json")
-        )
-        if _stor_jsons:
-            with open(_stor_jsons[0]) as _fh_s:
-                _stor_j = json.load(_fh_s)
-            _inj_max = _stor_j.get("Flexibility", {}).get("injection_rate_max", "N/A")
-            _add_row("scenario.injection_rate_max_example", _inj_max, "t/h",
-                     f"injection_rate_max from first storage node ({_stor_jsons[0].parts[-3]})",
-                     "PermanentStorage_CO2_simple.json")
-    except Exception:
-        pass
-
     return pd.DataFrame(rows)[["parameter", "value", "unit", "description", "source"]]
 
 parameters_df = _build_parameters_df(h5_file)
@@ -1161,6 +1218,22 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     _all_a_opxf     = float(pd.to_numeric(networks_wide_df["opex_fixed"],    errors="coerce").fillna(0).sum()) if not networks_wide_df.empty else 0.0
     _all_a_opxv_mod = float(pd.to_numeric(networks_wide_df["opex_variable"], errors="coerce").fillna(0).sum()) if not networks_wide_df.empty else 0.0
 
+    # CAPEX/OPEX split by CCS element (annualized basis)
+    capture_capex_ann = _all_n_capex - _stor_capex
+    capture_opex_fixed_ann = _all_n_opxf - _stor_opxf
+    capture_opex_variable_ann = (_all_n_opxv_mod - _stor_opxv_mod) * annualization_factor
+    capture_opex_total_ann = capture_opex_fixed_ann + capture_opex_variable_ann
+
+    transport_capex_ann = _all_a_capex
+    transport_opex_fixed_ann = _all_a_opxf
+    transport_opex_variable_ann = _all_a_opxv_mod * annualization_factor
+    transport_opex_total_ann = transport_opex_fixed_ann + transport_opex_variable_ann
+
+    storage_capex_ann = _stor_capex
+    storage_opex_fixed_ann = _stor_opxf
+    storage_opex_variable_ann = _stor_opxv_mod * annualization_factor
+    storage_opex_total_ann = storage_opex_fixed_ann + storage_opex_variable_ann
+
     # Modelled-period totals (as optimizer sees them; CAPEX already year_fraction-scaled)
     _all_nodes_cost_mod   = _all_n_capex + _all_n_opxf + _all_n_opxv_mod
     _stor_cost_mod        = _stor_capex  + _stor_opxf  + _stor_opxv_mod
@@ -1174,8 +1247,48 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     # storage_direct_cost_system is already the annualized storage cost (computed above)
     _netw_cost_ann        = _all_a_capex + _all_a_opxf + _all_a_opxv_mod * annualization_factor
     capture_only_ann_bu   = _all_nodes_cost_ann - storage_direct_cost_system
+    transport_only_ann_bu = _netw_cost_ann
+    storage_only_ann_bu   = storage_direct_cost_system
     ts_cost_ann_bu        = storage_direct_cost_system + _netw_cost_ann
     lccs_ann_bu           = capture_only_ann_bu + ts_cost_ann_bu
+
+    # Annualized import/export costs (summary values are modelled-period totals).
+    imports_ann = float((cost_imports or 0.0) * annualization_factor)
+    exports_ann = float((cost_exports or 0.0) * annualization_factor)
+    import_export_net_ann = imports_ann + exports_ann
+
+    # Direct import-cost decomposition (no proportional allocation):
+    # capture  = sum(node cost_import) over active emitter nodes
+    # transport = sum(node network_consumption*import_price) over nodes used by active transport arcs
+    # storage  = sum(node cost_import) over storage nodes
+    active_transport_nodes = set()
+    if not active_transport.empty:
+        active_transport_nodes = set(active_transport["fromNode"].astype(str)) | set(active_transport["toNode"].astype(str))
+
+    active_emitter_nodes = {
+        str(n)
+        for n, c in emitter_captured_annualized.items()
+        if float(c) > 0 and str(n) in active_transport_nodes and str(n) not in stor_node_names
+    }
+    storage_nodes_set = {str(n) for n in stor_node_names}
+
+    capture_import_cost_direct_ann = float(
+        sum(float(node_import_cost_annualized.get(n, 0.0)) for n in active_emitter_nodes)
+    )
+    transport_import_cost_direct_ann = float(
+        sum(float(node_network_import_cost_annualized.get(n, 0.0)) for n in active_transport_nodes)
+    )
+    storage_import_cost_direct_ann = float(
+        sum(float(node_import_cost_annualized.get(n, 0.0)) for n in storage_nodes_set)
+    )
+
+    capture_only_incl_imports_ann = capture_only_ann_bu + capture_import_cost_direct_ann
+    transport_only_incl_imports_ann = transport_only_ann_bu + transport_import_cost_direct_ann
+    storage_only_incl_imports_ann = storage_only_ann_bu + storage_import_cost_direct_ann
+
+    breakdown_sum_incl_imports_ann = (
+        capture_only_incl_imports_ann + transport_only_incl_imports_ann + storage_only_incl_imports_ann
+    )
 
     def _per_t(cost): return cost / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     total_minus_lccs = (total_cost - lccs_mod_bu) if total_cost is not None else None
@@ -1224,6 +1337,22 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "capture_only_cost_modelled_period",    "value": capture_only_mod_bu,       "unit": "€",      "note": "Bottom-up: all non-storage node costs over modelled period (CAPEX+OPEX_fixed year_fraction-scaled; OPEX_var raw)"},
         {"metric": "capture_only_cost_annualized",         "value": capture_only_ann_bu,       "unit": "€/y",    "note": "Bottom-up annualized: OPEX_variable scaled to annual basis"},
         {"metric": "capture_only_cost_per_t_annualized",   "value": _per_t(capture_only_ann_bu),"unit": "€/t CO2","note": "capture_only_cost_annualized / total_CO2_injected_annualized"},
+        {"metric": "capture_capex_EUR_annualized",         "value": capture_capex_ann,         "unit": "€/y",    "note": "Capture CAPEX = all node CAPEX minus storage node CAPEX"},
+        {"metric": "capture_opex_fixed_EUR_annualized",    "value": capture_opex_fixed_ann,    "unit": "€/y",    "note": "Capture OPEX fixed = all node OPEX_fixed minus storage node OPEX_fixed"},
+        {"metric": "capture_opex_variable_EUR_annualized", "value": capture_opex_variable_ann, "unit": "€/y",    "note": "Capture OPEX variable annualized from modelled-period values"},
+        {"metric": "capture_opex_total_EUR_annualized",    "value": capture_opex_total_ann,    "unit": "€/y",    "note": "capture_opex_fixed + capture_opex_variable"},
+        {"metric": "transport_only_cost_annualized",       "value": transport_only_ann_bu,     "unit": "€/y",    "note": "Bottom-up annualized transport-only network cost"},
+        {"metric": "transport_only_cost_per_t_annualized", "value": _per_t(transport_only_ann_bu), "unit": "€/t CO2", "note": "transport_only_cost_annualized / total_CO2_injected_annualized"},
+        {"metric": "transport_capex_EUR_annualized",       "value": transport_capex_ann,       "unit": "€/y",    "note": "Transport CAPEX from network arcs"},
+        {"metric": "transport_opex_fixed_EUR_annualized",  "value": transport_opex_fixed_ann,  "unit": "€/y",    "note": "Transport OPEX fixed from network arcs"},
+        {"metric": "transport_opex_variable_EUR_annualized", "value": transport_opex_variable_ann, "unit": "€/y", "note": "Transport OPEX variable annualized from modelled-period values"},
+        {"metric": "transport_opex_total_EUR_annualized",  "value": transport_opex_total_ann,  "unit": "€/y",    "note": "transport_opex_fixed + transport_opex_variable"},
+        {"metric": "storage_only_cost_annualized",         "value": storage_only_ann_bu,       "unit": "€/y",    "note": "Bottom-up annualized storage-only node cost"},
+        {"metric": "storage_only_cost_per_t_annualized",   "value": _per_t(storage_only_ann_bu), "unit": "€/t CO2", "note": "storage_only_cost_annualized / total_CO2_injected_annualized"},
+        {"metric": "storage_capex_EUR_annualized",         "value": storage_capex_ann,         "unit": "€/y",    "note": "Storage CAPEX from storage nodes"},
+        {"metric": "storage_opex_fixed_EUR_annualized",    "value": storage_opex_fixed_ann,    "unit": "€/y",    "note": "Storage OPEX fixed from storage nodes"},
+        {"metric": "storage_opex_variable_EUR_annualized", "value": storage_opex_variable_ann, "unit": "€/y",    "note": "Storage OPEX variable annualized from modelled-period values"},
+        {"metric": "storage_opex_total_EUR_annualized",    "value": storage_opex_total_ann,    "unit": "€/y",    "note": "storage_opex_fixed + storage_opex_variable"},
         {"metric": "TS_cost_modelled_period",              "value": ts_cost_mod_bu,            "unit": "€",      "note": "Bottom-up: storage node costs + network arc costs over modelled period"},
         {"metric": "TS_cost_annualized",                   "value": ts_cost_ann_bu,            "unit": "€/y",    "note": "Bottom-up annualized: storage + network costs"},
         {"metric": "TS_cost_per_t_annualized",             "value": _per_t(ts_cost_ann_bu),    "unit": "€/t CO2","note": "TS_cost_annualized / total_CO2_injected_annualized"},
@@ -1233,6 +1362,17 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "import_export_net_cost_system",  "value": import_export_net_cost_system, "unit": "€",      "note": "cost_imports + cost_exports from summary (raw modelled-period total)"},
         {"metric": "import_export_net_cost_system_annualized", "value": import_export_net_cost_system * annualization_factor, "unit": "€/y", "note": "(cost_imports + cost_exports) × annualization_factor — annualized to annual basis"},
         {"metric": "import_export_net_cost_per_t_annualized", "value": import_export_net_cost_per_t, "unit": "€/t CO2", "note": "Annualized: (cost_imports + cost_exports) / total_CO2_injected_annualized"},
+        {"metric": "capture_import_cost_direct_EUR_annualized", "value": capture_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over active emitter nodes (captured CO2 > 0, connected to active transport, excluding storage nodes)"},
+        {"metric": "transport_import_cost_direct_EUR_annualized", "value": transport_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of network_consumption*import_price over nodes used by active transport arcs"},
+        {"metric": "storage_import_cost_direct_EUR_annualized", "value": storage_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over storage/sink nodes"},
+        {"metric": "capture_only_incl_imports_EUR_annualized", "value": capture_only_incl_imports_ann, "unit": "€/y", "note": "capture_only_cost_annualized + capture_import_cost_direct_EUR_annualized"},
+        {"metric": "capture_only_incl_imports_per_t_annualized", "value": _per_t(capture_only_incl_imports_ann), "unit": "€/t CO2", "note": "capture_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "transport_only_incl_imports_EUR_annualized", "value": transport_only_incl_imports_ann, "unit": "€/y", "note": "transport_only_cost_annualized + transport_import_cost_direct_EUR_annualized"},
+        {"metric": "transport_only_incl_imports_per_t_annualized", "value": _per_t(transport_only_incl_imports_ann), "unit": "€/t CO2", "note": "transport_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "storage_only_incl_imports_EUR_annualized", "value": storage_only_incl_imports_ann, "unit": "€/y", "note": "storage_only_cost_annualized + storage_import_cost_direct_EUR_annualized"},
+        {"metric": "storage_only_incl_imports_per_t_annualized", "value": _per_t(storage_only_incl_imports_ann), "unit": "€/t CO2", "note": "storage_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "breakdown_sum_incl_imports_EUR_annualized", "value": breakdown_sum_incl_imports_ann, "unit": "€/y", "note": "capture_only_incl_imports + transport_only_incl_imports + storage_only_incl_imports (using direct import sums, not proportional allocation)"},
+        {"metric": "breakdown_sum_incl_imports_per_t_annualized", "value": _per_t(breakdown_sum_incl_imports_ann), "unit": "€/t CO2", "note": "Sum of three CCS elements incl. direct import costs per t; may differ from full_chain_incl_imports_per_t_annualized due to different accounting boundaries"},
         {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "total_cost - LCCS_modelled_period (residual = imports/exports/carbon/violation)"},
         {"metric": "LCCS_share_of_total_cost",       "value": (lccs_mod_bu / total_cost if (total_cost is not None and total_cost != 0) else None), "unit": "-", "note": "LCCS_modelled_period / total_cost"},
         # ── UPFRONT CAPEX TRANSPARENCY ──────────────────────────────────────────────────────
@@ -1309,6 +1449,8 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         if var == "CO2captured_var_output_ccs":
             emitter_captured_modelled[node] = emitter_captured_modelled.get(node, 0.0) + float(np.array(v).sum())
     emitter_captured_annualized = {k: v * annualization_factor for k, v in emitter_captured_modelled.items()}
+    total_co2_captured_modelled = float(sum(emitter_captured_modelled.values()))
+    total_co2_captured_annualized = total_co2_captured_modelled * annualization_factor
 
     emitter_transport_modelled = {}
     if not active_transport.empty:
@@ -1469,14 +1611,16 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         full_chain_total, full_chain_total_per_t = None, None
 
     # imports/exports from summary are raw modelled-period totals → annualize before adding
-    imports_ann = (cost_imports or 0.0) * annualization_factor
-    exports_ann = (cost_exports or 0.0) * annualization_factor
     full_chain_incl_imports = (
         (full_chain_total + imports_ann + exports_ann) if full_chain_total is not None else None
     )
     full_chain_incl_imports_per_t = (
         full_chain_incl_imports / total_co2_injected_annualized
         if (full_chain_incl_imports is not None and total_co2_injected_annualized > 0) else None
+    )
+    lcoc_full_chain_incl_imports_per_t_captured = (
+        full_chain_incl_imports / total_co2_captured_annualized
+        if (full_chain_incl_imports is not None and total_co2_captured_annualized > 0) else None
     )
 
     overall_df = pd.concat([overall_df, pd.DataFrame([
@@ -1496,6 +1640,18 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
          "value": full_chain_incl_imports_per_t,
          "unit": "€/t CO2",
          "note": "full_chain_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "total_CO2_captured_modelled",
+         "value": total_co2_captured_modelled,
+         "unit": "t CO2",
+         "note": "Sum of captured CO2 from all CCS technologies over modelled horizon"},
+        {"metric": "total_CO2_captured_annualized",
+         "value": total_co2_captured_annualized,
+         "unit": "t CO2/y",
+         "note": "total_CO2_captured_modelled scaled to annual basis"},
+        {"metric": "lcoc_full_chain_incl_imports_per_t_captured_annualized",
+         "value": lcoc_full_chain_incl_imports_per_t_captured,
+         "unit": "€/t CO2",
+         "note": "full_chain_incl_imports_EUR_annualized / total_CO2_captured_annualized (LCOC-style denominator uses captured CO2)"},
     ])], ignore_index=True)
 
     emitter_alloc_df = pd.DataFrame(emitter_alloc_rows)
@@ -1510,6 +1666,44 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
 co2_capture_overall_df, co2_capture_per_stor_df, co2_capture_per_component_df, co2_capture_emitter_alloc_df = _build_co2_capture_df(
     h5_file, nodes_wide, networks_wide, raw_summary
 )
+
+# ── Storage geological capacity map ─────────────────────────────────────────────────────────
+# Used only for the Storage_Utilization sheet. If DB table/columns are unavailable,
+# geological_capacity_T stays blank instead of stopping export.
+_cap_T_map = {}
+if db_path.exists():
+    try:
+        _con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            _cap_df = _con.execute(
+                """
+                SELECT name_sanitized, geological_capacity_T
+                FROM combined_selected_final
+                WHERE name_sanitized IS NOT NULL
+                  AND geological_capacity_T IS NOT NULL
+                """
+            ).df()
+        except Exception:
+            _cap_df = _con.execute(
+                """
+                SELECT name_sanitized, geo_capacity_ton
+                FROM combined_selected_final
+                WHERE name_sanitized IS NOT NULL
+                  AND geo_capacity_ton IS NOT NULL
+                """
+            ).df().rename(columns={"geo_capacity_ton": "geological_capacity_T"})
+        finally:
+            _con.close()
+
+        if not _cap_df.empty:
+            _cap_df["name_sanitized"] = _cap_df["name_sanitized"].astype(str).str.strip()
+            _cap_df["geological_capacity_T"] = pd.to_numeric(
+                _cap_df["geological_capacity_T"], errors="coerce"
+            )
+            _cap_df = _cap_df.dropna(subset=["geological_capacity_T"])
+            _cap_T_map = dict(zip(_cap_df["name_sanitized"], _cap_df["geological_capacity_T"]))
+    except Exception as _e:
+        print(f"[WARN] Could not load geological capacity map from DB: {_e}")
 
 # ── Build Storage_Utilization DataFrame ──────────────────────────────────────────────────────
 # Re-read storage JSONs for size_max / injection_rate_max / OPEX_variable as written by main.py.
@@ -1602,8 +1796,8 @@ print("="*90)
 if components_out.empty:
     print("No active components found.")
 else:
-    print(components_out[["component_id","n_nodes","n_arcs","has_sink","sink_nodes"]].to_string(index=False))
-    print(f"\n  Components without sink: {len(components_without_sink)}")
+    print(components_out[["component_id","n_nodes","n_arcs","has_storage_sink","storage_sink_nodes","has_terminal_node","terminal_nodes"]].to_string(index=False))
+    print(f"\n  Components without storage sink: {len(components_without_sink)}")
 
 # ══════════════════════════════════════════════════════════
 # EXPORT TO EXCEL — single file, multi-tab
