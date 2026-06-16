@@ -146,6 +146,21 @@ def parse_linestring_wkt(wkt_str):
 
     return points if len(points) >= 2 else None
 
+
+def orient_route_locations(route_locations, start_coords, end_coords):
+    """Ensure a route runs from start_coords to end_coords when the geometry is reversed."""
+    if not route_locations or len(route_locations) < 2 or start_coords is None or end_coords is None:
+        return route_locations
+
+    def squared_distance(point, target):
+        return (point[0] - target[0]) ** 2 + (point[1] - target[1]) ** 2
+
+    start_d = squared_distance(route_locations[0], start_coords) + squared_distance(route_locations[-1], end_coords)
+    reversed_d = squared_distance(route_locations[-1], start_coords) + squared_distance(route_locations[0], end_coords)
+    if reversed_d < start_d:
+        return list(reversed(route_locations))
+    return route_locations
+
 def load_ship_route_geometries(base_dir):
     """Load ship route WKT, prefer manual file when available and valid."""
     inter_dir = base_dir / "2_data_processed" / "intermediate_output"
@@ -525,11 +540,12 @@ try:
                     dr = global_dr
             except Exception:
                 pass
-            # Annualization factor: r / (1 - (1/(1+r)^n) * year_fraction
+            # Annualization factor: r / (1 - (1/(1+r)^n)) * year_fraction
+            _yf = (1.0 / annualization_factor_nodes) if annualization_factor_nodes > 0 else 1.0
             if dr == 0:
-                af = (1.0 / lt) * year_fraction
+                af = (1.0 / lt) * _yf
             else:
-                af = (dr / (1 - (1 / (1 + dr) ** lt))) * year_fraction
+                af = (dr / (1 - (1 / (1 + dr) ** lt))) * _yf
             mode_af_map[mode] = af
 except Exception as e:
     print(f"[WARN] Could not load network annualization factors: {e}")
@@ -1257,38 +1273,29 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     exports_ann = float((cost_exports or 0.0) * annualization_factor)
     import_export_net_ann = imports_ann + exports_ann
 
-    # Direct import-cost decomposition (no proportional allocation):
-    # capture  = sum(node cost_import) over active emitter nodes
-    # transport = sum(node network_consumption*import_price) over nodes used by active transport arcs
-    # storage  = sum(node cost_import) over storage nodes
-    active_transport_nodes = set()
-    if not active_transport.empty:
-        active_transport_nodes = set(active_transport["fromNode"].astype(str)) | set(active_transport["toNode"].astype(str))
+    # Per-node import costs computed locally from raw_eb (already loaded above).
+    # node_import_cost: sum(import * import_price) per node
+    # node_network_import_cost: sum(network_consumption * import_price) per node
+    _local_node_import_cost: dict[str, float] = {}
+    _local_node_net_import_cost: dict[str, float] = {}
+    for _k, _v in raw_eb.items():
+        if not (isinstance(_k, tuple) and len(_k) == 4):
+            continue
+        _period, _node, _carrier, _var = _k
+        if _var not in ("import", "network_consumption"):
+            continue
+        _price_key = (_period, _node, _carrier, "import_price")
+        if _price_key not in raw_eb:
+            continue
+        _amount = float(np.sum(np.array(_v, dtype=float) * np.array(raw_eb[_price_key], dtype=float)))
+        if _var == "import":
+            _local_node_import_cost[_node] = _local_node_import_cost.get(_node, 0.0) + _amount
+        else:
+            _local_node_net_import_cost[_node] = _local_node_net_import_cost.get(_node, 0.0) + _amount
+    _local_node_import_cost_ann = {n: c * annualization_factor for n, c in _local_node_import_cost.items()}
+    _local_node_net_import_cost_ann = {n: c * annualization_factor for n, c in _local_node_net_import_cost.items()}
 
-    active_emitter_nodes = {
-        str(n)
-        for n, c in emitter_captured_annualized.items()
-        if float(c) > 0 and str(n) in active_transport_nodes and str(n) not in stor_node_names
-    }
-    storage_nodes_set = {str(n) for n in stor_node_names}
-
-    capture_import_cost_direct_ann = float(
-        sum(float(node_import_cost_annualized.get(n, 0.0)) for n in active_emitter_nodes)
-    )
-    transport_import_cost_direct_ann = float(
-        sum(float(node_network_import_cost_annualized.get(n, 0.0)) for n in active_transport_nodes)
-    )
-    storage_import_cost_direct_ann = float(
-        sum(float(node_import_cost_annualized.get(n, 0.0)) for n in storage_nodes_set)
-    )
-
-    capture_only_incl_imports_ann = capture_only_ann_bu + capture_import_cost_direct_ann
-    transport_only_incl_imports_ann = transport_only_ann_bu + transport_import_cost_direct_ann
-    storage_only_incl_imports_ann = storage_only_ann_bu + storage_import_cost_direct_ann
-
-    breakdown_sum_incl_imports_ann = (
-        capture_only_incl_imports_ann + transport_only_incl_imports_ann + storage_only_incl_imports_ann
-    )
+    # active_transport is defined later; compute decomposition after it is built (see below).
 
     def _per_t(cost): return cost / total_co2_injected_annualized if total_co2_injected_annualized > 0 else None
     total_minus_lccs = (total_cost - lccs_mod_bu) if total_cost is not None else None
@@ -1362,17 +1369,6 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
         {"metric": "import_export_net_cost_system",  "value": import_export_net_cost_system, "unit": "€",      "note": "cost_imports + cost_exports from summary (raw modelled-period total)"},
         {"metric": "import_export_net_cost_system_annualized", "value": import_export_net_cost_system * annualization_factor, "unit": "€/y", "note": "(cost_imports + cost_exports) × annualization_factor — annualized to annual basis"},
         {"metric": "import_export_net_cost_per_t_annualized", "value": import_export_net_cost_per_t, "unit": "€/t CO2", "note": "Annualized: (cost_imports + cost_exports) / total_CO2_injected_annualized"},
-        {"metric": "capture_import_cost_direct_EUR_annualized", "value": capture_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over active emitter nodes (captured CO2 > 0, connected to active transport, excluding storage nodes)"},
-        {"metric": "transport_import_cost_direct_EUR_annualized", "value": transport_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of network_consumption*import_price over nodes used by active transport arcs"},
-        {"metric": "storage_import_cost_direct_EUR_annualized", "value": storage_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over storage/sink nodes"},
-        {"metric": "capture_only_incl_imports_EUR_annualized", "value": capture_only_incl_imports_ann, "unit": "€/y", "note": "capture_only_cost_annualized + capture_import_cost_direct_EUR_annualized"},
-        {"metric": "capture_only_incl_imports_per_t_annualized", "value": _per_t(capture_only_incl_imports_ann), "unit": "€/t CO2", "note": "capture_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
-        {"metric": "transport_only_incl_imports_EUR_annualized", "value": transport_only_incl_imports_ann, "unit": "€/y", "note": "transport_only_cost_annualized + transport_import_cost_direct_EUR_annualized"},
-        {"metric": "transport_only_incl_imports_per_t_annualized", "value": _per_t(transport_only_incl_imports_ann), "unit": "€/t CO2", "note": "transport_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
-        {"metric": "storage_only_incl_imports_EUR_annualized", "value": storage_only_incl_imports_ann, "unit": "€/y", "note": "storage_only_cost_annualized + storage_import_cost_direct_EUR_annualized"},
-        {"metric": "storage_only_incl_imports_per_t_annualized", "value": _per_t(storage_only_incl_imports_ann), "unit": "€/t CO2", "note": "storage_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
-        {"metric": "breakdown_sum_incl_imports_EUR_annualized", "value": breakdown_sum_incl_imports_ann, "unit": "€/y", "note": "capture_only_incl_imports + transport_only_incl_imports + storage_only_incl_imports (using direct import sums, not proportional allocation)"},
-        {"metric": "breakdown_sum_incl_imports_per_t_annualized", "value": _per_t(breakdown_sum_incl_imports_ann), "unit": "€/t CO2", "note": "Sum of three CCS elements incl. direct import costs per t; may differ from full_chain_incl_imports_per_t_annualized due to different accounting boundaries"},
         {"metric": "total_cost_minus_LCCS",          "value": total_minus_lccs,              "unit": "€",      "note": "total_cost - LCCS_modelled_period (residual = imports/exports/carbon/violation)"},
         {"metric": "LCCS_share_of_total_cost",       "value": (lccs_mod_bu / total_cost if (total_cost is not None and total_cost != 0) else None), "unit": "-", "note": "LCCS_modelled_period / total_cost"},
         # ── UPFRONT CAPEX TRANSPARENCY ──────────────────────────────────────────────────────
@@ -1451,6 +1447,48 @@ def _build_co2_capture_df(h5_path: Path, nodes_wide_df: pd.DataFrame,
     emitter_captured_annualized = {k: v * annualization_factor for k, v in emitter_captured_modelled.items()}
     total_co2_captured_modelled = float(sum(emitter_captured_modelled.values()))
     total_co2_captured_annualized = total_co2_captured_modelled * annualization_factor
+
+    # Direct import-cost decomposition (requires both active_transport and emitter_captured_annualized).
+    _at_nodes = set()
+    if not active_transport.empty:
+        _at_nodes = set(active_transport["fromNode"].astype(str)) | set(active_transport["toNode"].astype(str))
+    _emitter_nodes_set = {
+        str(n)
+        for n, c in emitter_captured_annualized.items()
+        if float(c) > 0 and str(n) in _at_nodes and str(n) not in stor_node_names
+    }
+    _storage_nodes_set = {str(n) for n in stor_node_names}
+
+    capture_import_cost_direct_ann = float(
+        sum(_local_node_import_cost_ann.get(n, 0.0) for n in _emitter_nodes_set)
+    )
+    transport_import_cost_direct_ann = float(
+        sum(_local_node_net_import_cost_ann.get(n, 0.0) for n in _at_nodes)
+    )
+    storage_import_cost_direct_ann = float(
+        sum(_local_node_import_cost_ann.get(n, 0.0) for n in _storage_nodes_set)
+    )
+
+    capture_only_incl_imports_ann = capture_only_ann_bu + capture_import_cost_direct_ann
+    transport_only_incl_imports_ann = transport_only_ann_bu + transport_import_cost_direct_ann
+    storage_only_incl_imports_ann = storage_only_ann_bu + storage_import_cost_direct_ann
+    breakdown_sum_incl_imports_ann = (
+        capture_only_incl_imports_ann + transport_only_incl_imports_ann + storage_only_incl_imports_ann
+    )
+
+    overall_df = pd.concat([overall_df, pd.DataFrame([
+        {"metric": "capture_import_cost_direct_EUR_annualized", "value": capture_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over active emitter nodes (captured CO2 > 0, connected to active transport, excluding storage nodes)"},
+        {"metric": "transport_import_cost_direct_EUR_annualized", "value": transport_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of network_consumption*import_price over nodes used by active transport arcs"},
+        {"metric": "storage_import_cost_direct_EUR_annualized", "value": storage_import_cost_direct_ann, "unit": "€/y", "note": "Direct sum of node cost_import over storage/sink nodes"},
+        {"metric": "capture_only_incl_imports_EUR_annualized", "value": capture_only_incl_imports_ann, "unit": "€/y", "note": "capture_only_cost_annualized + capture_import_cost_direct_EUR_annualized"},
+        {"metric": "capture_only_incl_imports_per_t_annualized", "value": _per_t(capture_only_incl_imports_ann), "unit": "€/t CO2", "note": "capture_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "transport_only_incl_imports_EUR_annualized", "value": transport_only_incl_imports_ann, "unit": "€/y", "note": "transport_only_cost_annualized + transport_import_cost_direct_EUR_annualized"},
+        {"metric": "transport_only_incl_imports_per_t_annualized", "value": _per_t(transport_only_incl_imports_ann), "unit": "€/t CO2", "note": "transport_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "storage_only_incl_imports_EUR_annualized", "value": storage_only_incl_imports_ann, "unit": "€/y", "note": "storage_only_cost_annualized + storage_import_cost_direct_EUR_annualized"},
+        {"metric": "storage_only_incl_imports_per_t_annualized", "value": _per_t(storage_only_incl_imports_ann), "unit": "€/t CO2", "note": "storage_only_incl_imports_EUR_annualized / total_CO2_injected_annualized"},
+        {"metric": "breakdown_sum_incl_imports_EUR_annualized", "value": breakdown_sum_incl_imports_ann, "unit": "€/y", "note": "capture_only_incl_imports + transport_only_incl_imports + storage_only_incl_imports (direct import sums)"},
+        {"metric": "breakdown_sum_incl_imports_per_t_annualized", "value": _per_t(breakdown_sum_incl_imports_ann), "unit": "€/t CO2", "note": "Sum of three CCS elements incl. direct import costs per t"},
+    ])], ignore_index=True)
 
     emitter_transport_modelled = {}
     if not active_transport.empty:
@@ -1950,6 +1988,8 @@ for _, row in all_arcs_map.iterrows():
     elif row["mode"] == "CO2_Pipeline":
         pipe_key = (normalize(repair_name(fn)), normalize(repair_name(tn)))
         route_locations = manual_pipeline_geom.get(pipe_key, route_locations)
+
+    route_locations = orient_route_locations(route_locations, fc, tc)
 
     row_size = pd.to_numeric(row.get("size"), errors="coerce")
     row_flow = pd.to_numeric(row.get("total_flow"), errors="coerce")

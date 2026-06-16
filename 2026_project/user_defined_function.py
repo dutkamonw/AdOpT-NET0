@@ -124,7 +124,8 @@ def canonicalize_name(name):
         "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÃ‡ DELS HORTS)": "CEMENTOS MOLINS INDUSTRIAL (SANT VICENÇ DELS HORTS)",
         "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi": "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
         "UnitÃ  Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi": "Unità Locale 3 - Impianto di Termovalorizzazione rifiuti non pericolosi",
-        "EVERÃ‰ SAS": "ÉVERÉ SAS",
+        "EVERÃ‰ SAS": "EVERÉ SAS",
+        "ÉVERÉ SAS": "EVERÉ SAS",
     }
     if s in explicit_fixes:
         return explicit_fixes[s]
@@ -1626,6 +1627,9 @@ def create_node_location(altitude, path_model_input):
     
     con.close()
 
+    if not nodes.empty:
+        nodes["name"] = nodes["name"].apply(canonicalize_name)
+
     node_locations = nodes[['name', 'longitude', 'latitude']].copy()
     node_locations.rename(columns={'longitude': 'lon', 'latitude': 'lat'}, inplace=True)
     node_locations['alt'] = altitude
@@ -1998,6 +2002,12 @@ def assign_technologies_to_nodes(input_path, output_path):
 
     con.close()
 
+    emitters = {
+        canonicalize_name(name): value
+        for name, value in emitters.items()
+    }
+    storage = {canonicalize_name(name) for name in storage}
+
     ### Load MEA size_min as cutoff for MEA technology assignment
     # Path for MEA JSON files
     mea_files = {
@@ -2028,6 +2038,7 @@ def assign_technologies_to_nodes(input_path, output_path):
 
     # Iterate through each node in the topology and assign technologies based on its type (emitter and storage).
     for node_name in topology["nodes"]:
+        node_name = canonicalize_name(node_name)
         
         # node folder
         node_folder = output_path / "period1" / "node_data" / node_name

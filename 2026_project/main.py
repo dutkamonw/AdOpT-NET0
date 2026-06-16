@@ -34,6 +34,7 @@
 ############################################################################################################################
 
 import json
+import os
 from pathlib import Path
 import adopt_net0 as adopt
 import shutil
@@ -76,8 +77,8 @@ run_model = True # Step 13) run the optimization model
 
 # The injection rate is set as a fraction of geological storage capacity per year
 percentage_injection = 0.04             # fixed at 4 % of geological capacity per year (Base mid-case)
-opex_var_storage_EUR_per_t = 61.6     # 42.5-50.6-75.8 EUR/tCO2 based on Ravenna levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
-ccs_reduction_target  = 0.40            # % target reduction used for emission_limit = 1 - ccs_reduction_target
+opex_var_storage_EUR_per_t = 61.6     # 55.4-61.6-86.2 EUR/t relevelised from 42.5-50.6-75.8 EUR/tCO2 based on Ravenna levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
+ccs_reduction_target  = float(os.environ.get("CCS_REDUCTION_TARGET", 0.70))  # set by loop_model.py via env var; fallback=0.70
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
