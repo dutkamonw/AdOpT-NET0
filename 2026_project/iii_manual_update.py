@@ -36,7 +36,16 @@ updated_ship_routes = output_path_data_processed / "intermediate_output" / "ship
 
 #########################################################################################
 
-def manual_update():
+def manual_update(selection_col: str = "selection_2"):
+    """
+    Run the manual-update pipeline.
+
+    Parameters:
+    selection_col (str): Name of the scenario selection column to use throughout this
+                 step ('selection' for scenario_1, 'capacity_T' is its matching capacity
+                 column; 'selection_2' for scenario_2, matched with 'capacity_T_2').
+                 Default 'selection_2' (preserves prior behaviour when called standalone).
+    """
     
 ################# 1) Load and prepare data for processing ##############################
     
@@ -48,7 +57,7 @@ def manual_update():
     selected_names = {
         canonicalize_name(n)
         for n in df_combined_selected.loc[
-            df_combined_selected["selection"].fillna("") == "Yes", "name_sanitized"
+            df_combined_selected[selection_col].fillna("") == "Yes", "name_sanitized"
         ].dropna().astype(str)
     }
     df_pipeline_selected["selected_emitter"] = df_pipeline_selected.apply(
@@ -113,7 +122,7 @@ def manual_update():
     output_path_dist = output_path_data_processed / 'network_topology_prep' / 'CO2Ship' / 'distance.csv'
     
     # Distance matrix
-    matrix = create_matrix(table_name, col_start, col_end, value, output_path_dist)
+    matrix = create_matrix(table_name, col_start, col_end, value, output_path_dist, selection_col=selection_col)
     print(f"Manual update: Updated distance matrix for '{table_name}'")
     print("-------------------------------------")
 
@@ -148,7 +157,7 @@ def manual_update():
     output_path_dist = output_path_data_processed / 'network_topology_prep' / 'CO2_Pipeline' / 'distance.csv'
     
     # Distance matrix
-    matrix = create_matrix(table_name, col_start, col_end, value, output_path_dist)
+    matrix = create_matrix(table_name, col_start, col_end, value, output_path_dist, selection_col=selection_col)
     print(f"Manual update: Updated distance matrix for '{table_name}'")
 
     # Connection matrix
@@ -184,11 +193,11 @@ def manual_update():
     # Get data from combined_selected table in database.duckdb
     con = duckdb.connect(str(db_path))
     try:
-        node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE selection = 'Yes'").fetchall()
+        node_name = con.execute(f"SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE {selection_col} = 'Yes'").fetchall()
     except:
         node_name = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected").fetchall()
     try:
-        subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected_final WHERE selection = 'Yes'").fetchall()
+        subsector = con.execute(f"SELECT DISTINCT subsector FROM combined_selected_final WHERE {selection_col} = 'Yes'").fetchall()
     except:
         subsector = con.execute("SELECT DISTINCT subsector FROM combined_selected").fetchall()
     con.close()

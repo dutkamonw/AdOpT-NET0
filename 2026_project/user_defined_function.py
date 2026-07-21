@@ -974,7 +974,7 @@ def create_pipeline_network(output_path):
 
 
 ############# 6. Create N x N matrix from database table #####################
-def create_matrix(table_name, col_start, col_end, value, output_path):
+def create_matrix(table_name, col_start, col_end, value, output_path, selection_col='selection_2'):
     """ 
     Create a square matrix (return as DataFrame) from a database table.
 
@@ -986,9 +986,13 @@ def create_matrix(table_name, col_start, col_end, value, output_path):
                  great-circle distance is calculated automatically using the
                  'distance()' function (requires latitude/longitude columns in the table).
     output_path (str or Path): Path to save the resulting CSV file.
+    selection_col (str): Name of the scenario selection column ('selection' for scenario_1,
+                 'selection_2' for scenario_2). Only applied if the column exists in the
+                 queried table (e.g. raw/pre-manual-edit tables won't have it, and are
+                 used unfiltered). Default 'selection_2'.
 
     Auto-detected columns (optional):
-    - 'selection': if present, only rows where selection == 'Yes' are used.
+    - selection_col (see above): if present, only rows where it == 'Yes' are used.
     - 'direction': if present, controls how the matrix is filled:
         * 'oneway'  -> fill [col_start -> col_end] only
         * 'reverse' -> fill [col_end -> col_start] only
@@ -1012,9 +1016,11 @@ def create_matrix(table_name, col_start, col_end, value, output_path):
     with duckdb.connect(DB_PATH) as con:
         data = con.execute(query).fetchdf()
     
-    # if 'selection' column exists, filter to keep only rows where selection == 'Yes'
-    if 'selection' in data.columns:
-        data = data[data['selection'].astype(str).str.strip() == 'Yes'].copy()
+    # If the scenario's selection column exists in this table, filter to keep only
+    # rows where it == 'Yes'. Raw/pre-manual-edit tables won't have this column yet,
+    # so they pass through unfiltered.
+    if selection_col in data.columns:
+        data = data[data[selection_col].astype(str).str.strip() == 'Yes'].copy()
 
     # Canonicalize node names before creating matrix to prevent duplicate mojibake variants.
     data['node_start'] = data['node_start'].apply(canonicalize_name)
@@ -1604,7 +1610,7 @@ def create_gamma_matrix_v3(
     return gamma_matrices
 
 #################### 7. Create NodeLocations.csv ########################
-def create_node_location(altitude, path_model_input):
+def create_node_location(altitude, path_model_input, selection_col='selection_2'):
     """Create NodeLocations.csv for a given node type (emitter, port, storage) with specified altitude. 
     The node names are sanitized to be safe for file/folder naming and are used as the index in the output CSV.
     The CSV is formatted with ';' as the separator and includes columns for longitude (lon), latitude (lat), and altitude (alt).
@@ -1613,6 +1619,8 @@ def create_node_location(altitude, path_model_input):
     type (str): The type of nodes to include in the output (e.g., 'emitter', 'port', 'storage').
     altitude (float): The altitude value to assign to all nodes in the output.
     path_model_input (str or Path): The directory where the NodeLocations.csv file will be saved.
+    selection_col (str): Name of the scenario selection column to filter combined_selected_final
+                 on ('selection' for scenario_1, 'selection_2' for scenario_2). Default 'selection_2'.
     
     """
 
@@ -1620,7 +1628,10 @@ def create_node_location(altitude, path_model_input):
     
     try:
         # Try to query combined_selected_final first
-        nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected_final WHERE selection ='Yes' AND longitude IS NOT NULL AND latitude IS NOT NULL").fetchdf()
+        nodes = con.execute(
+            f"SELECT name_sanitized AS name, longitude, latitude FROM combined_selected_final "
+            f"WHERE {selection_col} ='Yes' AND longitude IS NOT NULL AND latitude IS NOT NULL"
+        ).fetchdf()
     except duckdb.CatalogException:
         # If table doesn't exist, fall back to combined_selected
         nodes = con.execute("SELECT name_sanitized AS name, longitude, latitude FROM combined_selected WHERE longitude IS NOT NULL AND latitude IS NOT NULL").fetchdf()
@@ -1974,7 +1985,7 @@ def copy_all_files(input_path, output_path):
 
 ########################## 14. Assign techologies to nodes (config Technologies.json, copy technology JSON files, and update emitter JSONs) ##########################
 
-def assign_technologies_to_nodes(input_path, output_path):
+def assign_technologies_to_nodes(input_path, output_path, selection_col='selection_2'):
     """
     For each node in the topology, assign technologies based on its type (emitter, storage, or other).
     - Emitters: assign emitter technology and copy matching MEA CCS file for lookup
@@ -1985,18 +1996,24 @@ def assign_technologies_to_nodes(input_path, output_path):
     Parameters:
     input_path (str or Path): The directory containing the Topology.json file and technology preparation files.
     output_path (str or Path): Model input directory
+    selection_col (str): Name of the scenario selection column to filter combined_selected_final
+                 on ('selection' for scenario_1, 'selection_2' for scenario_2). Default 'selection_2'.
     """
     
     ### Load emitters and storage from combined_selected 
     con = duckdb.connect(DB_PATH)
     # Nested dictionary of emitters
     try:
-        emitters = con.execute(""" SELECT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND selection ='Yes' """).df().set_index('name').to_dict('index')
+        emitters = con.execute(
+            f""" SELECT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND {selection_col} ='Yes' """
+        ).df().set_index('name').to_dict('index')
     except duckdb.CatalogException:
         emitters = con.execute(""" SELECT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'""").df().set_index('name').to_dict('index')
     # Set of storage site names
     try:
-        storage = set(con.execute(""" SELECT name_sanitized AS name FROM combined_selected_final  WHERE type = 'storage' AND selection ='Yes' """).df()['name'].tolist())
+        storage = set(con.execute(
+            f""" SELECT name_sanitized AS name FROM combined_selected_final  WHERE type = 'storage' AND {selection_col} ='Yes' """
+        ).df()['name'].tolist())
     except duckdb.CatalogException:
         storage = set(con.execute(""" SELECT name_sanitized AS name FROM combined_selected  WHERE type = 'storage' """).df()['name'].tolist())
 

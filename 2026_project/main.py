@@ -1,11 +1,13 @@
 #####################################################################################################################
 # This script is the main script to run all steps from raw data to running the model.
 # !!! NEED to identify directory and which steps to run, see the section "IDENTIFY WHICH STEPS TO RUN" below !!!
+# Firstly, define the path, then identify which steps to run, and finally run the steps in order.
+
 
 ####### This script includes the following steps: #######
 
 # Intialize the AdOpT-NET0 template if needed (create the folder structure and template)
-# 1) Run adopt functions to initialize the template
+# 1) Run adopt functions to initialize the template (this includes update PPI data)
 
 # Data preparation and processing
 # 2) Run i_etl_raw_to_db.py (extract, transform, and load raw data into duckdb database, and create combined_selected nodes dataframe)
@@ -40,7 +42,7 @@ import adopt_net0 as adopt
 import shutil
 import duckdb
 import pandas as pd
-from user_defined_function import assign_technologies_to_nodes, copy_all_files, create_matrix, create_node_location
+from user_defined_function import assign_technologies_to_nodes, copy_all_files, create_node_location
 from i_etl_raw_to_db import etl_raw_to_db
 from ii_data_processing import data_processing
 from iii_manual_update import manual_update
@@ -64,21 +66,85 @@ db_path = script_dir / "database.duckdb"
 # Change to 'True' if you need to (re)run OR 'False' to skip the step
 initialize = False # Step 1) initialize the adopt-net0 template [!!IMPORTANT!!] This study has added 2025 PPI data into "producer_price_index_euro.csv" file
 raw_prep = False # Step 2) ETL raw data to database
-data_process = False # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
+data_process = True # Step 3) data processing (create matrix, update Topology.json, prepare technology and network data)
 
-manual_update_network = False  # Optional step (if there is a manual update on node selection and transportation routes))
+manual_update_network = True  # Optional step (if there is a manual update on node selection and transportation routes))
 
-building_node_folder = False # Step 4) create node folders based on Topology.json
+building_node_folder = True # Step 4) create node folders based on Topology.json
 prepare_inputs = True # Step 5) to 12) Formating inputs from update global model configuration,  copy processed files, and assign data to each nodes
 
-run_model = True # Step 13) run the optimization model
+run_model = False # Step 13) run the optimization model
+
 
 ############################### SCENARIO CONFIGURATION ########################################
 
+# objective
+#objective = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
+objective = "emissions_minC"      # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+
+# scenario_1: excl.Ravenna & Prinos
+# scenario_2: incl. Ravenna & Prinos
+scenario = "scenario_2"
+
+############################### PARAMETERS SETTING ########################################
+
 # The injection rate is set as a fraction of geological storage capacity per year
 percentage_injection = 0.04             # fixed at 4 % of geological capacity per year (Base mid-case)
-opex_var_storage_EUR_per_t = 61.6     # 55.4-61.6-86.2 EUR/t relevelised from 42.5-50.6-75.8 EUR/tCO2 based on Ravenna levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
-ccs_reduction_target  = float(os.environ.get("CCS_REDUCTION_TARGET", 0.70))  # set by loop_model.py via env var; fallback=0.70
+opex_var_storage_EUR_per_t = 61.6       # 55.4-61.6-86.2 EUR/t relevelised from 42.5-50.6-75.8 EUR/tCO2 based on Ravenna levelised storage cost, Italian goverment report: "Analisi degli aspetti tecnici, economici e normativi funzionali allo sviluppo della filiera CCUS" [Analysis of technical, economic, and regulatory aspects functional to the development of the CCUS supply chain] (2025)
+
+# Reduction target for costs_emissionlimit objective (Default 0.70 = 70% reduction from BAU emissions)
+# loop_model.py can override this via env var CCS_REDUCTION_TARGET when objective == costs_emissionlimit.
+ccs_reduction_target  = float(os.environ.get("CCS_REDUCTION_TARGET", 0.70))
+
+
+
+############################### HELPER #######################################################################
+# Helper dictionary to map scenario to the corresponding selection and capacity columns in the database.
+SCENARIO_COLUMNS = {
+    "scenario_1": {"selection_col": "selection",   "capacity_col": "capacity_T"},
+    "scenario_2": {"selection_col": "selection_2", "capacity_col": "capacity_T_2"},
+}
+if scenario not in SCENARIO_COLUMNS:
+    raise ValueError(f"Unknown scenario '{scenario}'. Choose one of {list(SCENARIO_COLUMNS)}.")
+selection_col = SCENARIO_COLUMNS[scenario]["selection_col"]
+capacity_col  = SCENARIO_COLUMNS[scenario]["capacity_col"]
+print(f"Scenario: {scenario}  (selection_col='{selection_col}', capacity_col='{capacity_col}')")
+
+
+def run_final_query(con, sql: str, purpose: str):
+    """Execute a scenario-aware query on combined_selected_final or fail with context."""
+    try:
+        return con.execute(sql)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read scenario-aware data for {purpose}. "
+            f"Expected table 'combined_selected_final' with columns '{selection_col}' and '{capacity_col}'. "
+            f"Original error: {exc}"
+        ) from exc
+
+
+# Persist the active scenario so result.py (and loop_model.py) use the exact same
+# scenario/columns as this run, without duplicating the setting elsewhere.
+with open(script_dir / "scenario_state.json", "w", encoding="utf-8") as _sf:
+    json.dump(
+        {"scenario": scenario, "selection_col": selection_col, "capacity_col": capacity_col},
+        _sf,
+        indent=4,
+    )
+
+# Safety: the loop is intended only for sweeping reduction targets under costs_emissionlimit.
+if os.environ.get("RUN_LOOP_MODE", "False").strip().lower() == "true" and objective != "costs_emissionlimit":
+    raise ValueError(
+        "loop_model.py is intended for objective='costs_emissionlimit' only. "
+        "Please set objective='costs_emissionlimit' in main.py before running the loop."
+    )
+
+
+
+
+
+
+
 
 
 ############################## RUN ALL MODEL INPUT PREPARATION STEPS ##############################################################################################
@@ -89,13 +155,16 @@ print(f"Initialize adopt-net0 template is {initialize}")
 if initialize:
      # Create optimization templates in the inputs folder
     adopt.create_optimization_templates(path_model_input)
+
     # Create input data folder template in the inputs folder
     adopt.create_input_data_folder_template(path_model_input)
     print("Initializing the template: Completed")
+
     # Replace the default producer price index data with the updated 2025 PPI data
     ppi_src = script_dir / "1_raw" / "producer_price_index_euro.csv"
     ppi_workspace = script_dir.parent / "adopt_net0" / "database" / "data" / "producer_price_index_euro.csv"
     shutil.copy2(ppi_src, ppi_workspace)
+
     # Also copy to the installed site-packages version (imported when running from 2026_project/)
     import adopt_net0 as _adopt_net0_pkg
     ppi_installed = Path(_adopt_net0_pkg.__file__).parent / "database" / "data" / "producer_price_index_euro.csv"
@@ -140,7 +209,7 @@ print("="*100)
 ################ Optional step: If there is a manual update on node selection and transportation routes,  ###############################
 
 if manual_update_network:
-    manual_update()
+    manual_update(selection_col=selection_col)
     print("Manual update: Completed")
 else:
     print("No manual update")
@@ -184,16 +253,18 @@ if prepare_inputs:
 
     # Get annual_total_emission from total emission_tpa of all emitters in combined_selected table in database.duckdb
     con = duckdb.connect(str(db_path))
-    try:
-        annual_total_emission = con.execute("SELECT SUM(emission_TPA) AS annual_total_emission FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").fetchone()[0]
-    except:
-        annual_total_emission = con.execute("SELECT SUM(emission_TPA) AS annual_total_emission FROM combined_selected WHERE type = 'emitter'").fetchone()[0]
+    annual_total_emission = run_final_query(
+        con,
+        f"SELECT SUM(emission_TPA) AS annual_total_emission FROM combined_selected_final "
+        f"WHERE type = 'emitter' AND {selection_col} = 'Yes'",
+        "annual_total_emission",
+    ).fetchone()[0]
     con.close()
 
     print(f"Annual total emission from database: {annual_total_emission:.2f} tCO2 per year")
 
     # Run function
-    create_node_location(altitude, path_model_input)
+    create_node_location(altitude, path_model_input, selection_col=selection_col)
     print("Updated NodeLocation.csv: Completed")
     print("-"*60)
 
@@ -202,23 +273,26 @@ if prepare_inputs:
         configuration = json.load(json_file)
 
     # Set optimization objective (select from existing options in ConfigModel.json)
-    #configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
-    configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
-    # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
-    # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
-    emission_limit_value = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
-    configuration["optimization"]["emission_limit"]["value"] = emission_limit_value
-
-
-    emissions_in_horizon = annual_total_emission * fraction_of_year_modelled
-    required_capture = emissions_in_horizon - emission_limit_value
-    print(
-        f"Emission target summary: emissions_in_horizon={emissions_in_horizon:.2f} tCO2, "
-        f"emission_limit={emission_limit_value:.2f} tCO2, required_capture={required_capture:.2f} tCO2"
-    )
+    if objective == "emissions_minC":
+        configuration["optimization"]["objective"]["value"] = "emissions_minC"  # find the minimum cost system at minimum emissions (minimizes net emissions in the first step and cost as a second step)
+        print("Optimization objective set to 'emissions_minC'")
+    
+    if objective == "costs_emissionlimit":
+        configuration["optimization"]["objective"]["value"] = "costs_emissionlimit"  # find the minimum cost system that meets a specified emission limit
+        print("Optimization objective set to 'costs_emissionlimit'")
+        # emission_limit: annual total emission × fraction of year modelled × target reduction (e.g. 0.2 = 80% reduction)
+        # fraction_of_year_modelled is auto-derived from Topology.json start_date/end_date above.
+        emission_limit_value = annual_total_emission * fraction_of_year_modelled * (1-ccs_reduction_target)
+        configuration["optimization"]["emission_limit"]["value"] = emission_limit_value
+        emissions_in_horizon = annual_total_emission * fraction_of_year_modelled
+        required_capture = emissions_in_horizon - emission_limit_value
+        print(
+            f"Emission target summary: emissions_in_horizon={emissions_in_horizon:.2f} tCO2, "
+            f"emission_limit={emission_limit_value:.2f} tCO2, required_capture={required_capture:.2f} tCO2"
+        )
 
     # Set value to define MIP gap for the optimization solver
-    configuration["solveroptions"]["mipgap"]["value"] = 0.02  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
+    configuration["solveroptions"]["mipgap"]["value"] = 0.01  # typically 1%-5% for large problems, lower for more accuracy but longer solve time
 
     configuration["solveroptions"]["numericfocus"]["value"] = 0 # 0 (default) to 3 (most aggressive) for better numerical stability, especially important for large-scale problems with wide-ranging cost coefficients
 
@@ -266,12 +340,28 @@ if prepare_inputs:
         copy_all_files(input_path, output_path)
     print("Copying network data and topology data: Completed")
 
+    # Scenario 2: zero CAPEX for terminal_to_storage arcs directly connecting to Ravenna and Prinos.
+    # These storage sites are treated as having existing injection infrastructure, so no new pipeline
+    # CAPEX is charged on the terminal→storage segment. We zero the columns for those nodes in the
+    # per-arc gamma matrices (gamma1, gamma2, gamma3) in the copied model-input files.
+    if scenario == "scenario_2":
+        zero_capex_storage_nodes = ["Ravenna", "Prinos"]
+        pipeline_topo_path = network_topology_folder / "new" / "CO2_Pipeline"
+        for gamma_file in ["gamma1.csv", "gamma2.csv", "gamma3.csv"]:
+            gf = pipeline_topo_path / gamma_file
+            if gf.exists():
+                df_g = pd.read_csv(gf, sep=";", index_col=0)
+                for node in zero_capex_storage_nodes:
+                    if node in df_g.columns:
+                        df_g[node] = 0.0
+                df_g.to_csv(gf, sep=";", float_format="%.4f", index_label="NODE")
+        print(f"Scenario 2: zeroed terminal_to_storage CAPEX for {zero_capex_storage_nodes} in gamma matrices.")
 
     ########################## 9) Assign technologies to nodes based on node type and update emitter JSON files  ##########################
 
     input_path = script_dir / "2_data_processed" / "technology_data_prep"
     output_path = path_model_input
-    assign_technologies_to_nodes(input_path, output_path)
+    assign_technologies_to_nodes(input_path, output_path, selection_col=selection_col)
     print("Assigning technologies to nodes and updating emitter JSON files: Completed")
     
     
@@ -289,10 +379,11 @@ if prepare_inputs:
 
     ### For heat, do not fill for starage
     con = duckdb.connect(str(db_path))
-    try:
-        heat_nodes = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE type != 'storage' AND selection = 'Yes' ").df()
-    except:
-        heat_nodes = con.execute("SELECT DISTINCT name_sanitized AS name FROM combined_selected WHERE type != 'storage' ").df()
+    heat_nodes = run_final_query(
+        con,
+        f"SELECT DISTINCT name_sanitized AS name FROM combined_selected_final WHERE type != 'storage' AND {selection_col} = 'Yes' ",
+        "heat node selection",
+    ).df()
     con.close()
 
     adopt.fill_carrier_data(
@@ -306,10 +397,11 @@ if prepare_inputs:
     ### Emission for each emitters
     #  For each emitter node, assign the emission_TPH value as 'Demand' for the corresponding subsector as carrier 
     con = duckdb.connect(str(db_path))
-    try:
-        df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND selection = 'Yes'").df()
-    except:
-        df = con.execute("SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected WHERE type = 'emitter'").df()
+    df = run_final_query(
+        con,
+        f"SELECT DISTINCT name_sanitized AS name, subsector, emission_TPH FROM combined_selected_final WHERE type = 'emitter' AND {selection_col} = 'Yes'",
+        "emitter rows",
+    ).df()
     con.close()
     
     for _, row in df.iterrows():
@@ -338,11 +430,13 @@ if prepare_inputs:
     ### Electricity and heat price based on country (if applicable)
     con = duckdb.connect(str(db_path))
     df_price = con.execute("SELECT * FROM electricity_price_yearly").df()
+    
     # Assign price to 'emitter' and 'port', except 'storage'
-    try:
-        df_nodes = con.execute("SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected_final WHERE type != 'storage' AND selection = 'Yes' ").df()
-    except:
-        df_nodes = con.execute("SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected WHERE type != 'storage' ").df()
+    df_nodes = run_final_query(
+        con,
+        f"SELECT DISTINCT name_sanitized AS name, iso2 FROM combined_selected_final WHERE type != 'storage' AND {selection_col} = 'Yes' ",
+        "node iso2 selection",
+    ).df()
     con.close()
 
     # Assign price for each node by merging nodes with iso2
@@ -391,18 +485,20 @@ if prepare_inputs:
     ######################### 11) Update storage injection rate & OPEX_var (scenario-aware) ########
 
     con = duckdb.connect(str(db_path))
-    try:
-        storage_df = con.execute(""" SELECT name_sanitized AS node_name, capacity_T FROM combined_selected_final WHERE type = 'storage' AND selection = 'Yes' """).fetchdf()
-    except:
-        storage_df = con.execute(""" SELECT name_sanitized AS node_name, capacity_T FROM combined_selected WHERE type = 'storage'""").fetchdf()
+    storage_df = run_final_query(
+        con,
+        f""" SELECT name_sanitized AS node_name, {capacity_col} AS capacity FROM combined_selected_final WHERE type = 'storage' AND {selection_col} = 'Yes' """,
+        "storage capacities",
+    ).fetchdf()
     con.close()
 
+    # For each storage node, compute the injection rate and size_max based on the capacity and percentage_injection, and update the corresponding PermanentStorage_CO2_simple.json file.
     if not storage_df.empty:
         total_size_max = 0.0
         for _, row in storage_df.iterrows():
-            if pd.isna(row['capacity_T']):
+            if pd.isna(row['capacity']):
                 continue
-            capacity = float(row['capacity_T'])
+            capacity = float(row['capacity'])
             node_name = str(row['node_name'])
 
             # Injection rate = fixed fraction of geological capacity (t/h), same across all scenarios
@@ -426,15 +522,16 @@ if prepare_inputs:
                 with open(json_path, 'w') as f:
                     json.dump(data, f, indent=4)
 
-        storage_margin = total_size_max - required_capture
-        print(
-            f"Storage feasibility check: max_injectable={total_size_max:.2f} tCO2, "
-            f"required_capture={required_capture:.2f} tCO2, margin={storage_margin:.2f} tCO2"
-        )
-        if storage_margin < 0:
+        if objective == "costs_emissionlimit":
+            storage_margin = total_size_max - required_capture
             print(
-                "WARNING: Storage capacity limit < Required capture. Model can become infeasible even before considering transport connectivity/losses."
+                f"Storage feasibility check: max_injectable={total_size_max:.2f} tCO2, "
+                f"required_capture={required_capture:.2f} tCO2, margin={storage_margin:.2f} tCO2"
             )
+            if storage_margin < 0:
+                print(
+                    "WARNING: Storage capacity limit < Required capture. Model can become infeasible even before considering transport connectivity/losses."
+                )
 
     print(
         f"Updated PermanentStorage_CO2_simple JSON files"
@@ -449,8 +546,8 @@ if prepare_inputs:
         node_names = json.load(f)["nodes"]
 
     carbon_price = 0  # Assume
+    
     success = 0
-
     for node in node_names:
         path = Path(path_model_input / f"period1/node_data/{node}/CarbonCost.csv")
         df = pd.read_csv(path, sep=";")

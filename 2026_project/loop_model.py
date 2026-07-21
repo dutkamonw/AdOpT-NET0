@@ -8,7 +8,9 @@ import subprocess
 PROJECT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = PROJECT_DIR / "results"
 
-TARGETS = range(10, 101, 10)  # R10, R20, ..., R100
+# Sweep only reduction targets (R10, R20, ..., R100).
+# Scenario and objective remain defined in main.py.
+TARGETS = range(10, 101, 10)
 
 
 def find_h5_files():
@@ -56,7 +58,7 @@ for pct in TARGETS:
 
     env = os.environ.copy()
     env["CCS_REDUCTION_TARGET"] = str(target)
-    env["RUN_MODEL"] = "True"
+    env["RUN_LOOP_MODE"] = "True"
 
     before = find_h5_files()
     start_time = time.time()
